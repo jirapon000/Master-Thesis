@@ -40,23 +40,46 @@ SHORT_KEYS = {
 
 # ================= PROMPTS =================
 intro_template = ChatPromptTemplate.from_messages([
-    ("system", "You are a warm, empathetic psychologist. Ask how the participant is doing today. Keep it short."),
+    ("system", """You are a warm, empathetic licensed psychologist.
+Your goal is to build immediate rapport with the participant.
+- Greet them warmly and professionally.
+- Ask how they are doing today.
+- Keep it short (1-2 sentences)."""),
     ("human", "Start the session.")
 ])
 
 rapport_template = ChatPromptTemplate.from_messages([
-    ("system", "Respond naturally to the participant's small talk. Do NOT ask clinical questions yet."),
+    ("system", """You are a licensed psychologist building trust.
+The participant just responded to your greeting.
+Your goal: Validate their feelings and maintain a supportive connection.
+- If they are positive, share that positivity.
+- If they seem down or stressed, show empathy ("I'm sorry to hear that", "That sounds tough").
+- **Do NOT** start the clinical assessment yet. Just be human.
+- Keep it brief."""),
     ("human", "{last_response}")
 ])
 
 transition_template = ChatPromptTemplate.from_messages([
-    ("system", "Transition smoothly to asking about their health and mood over the LAST TWO WEEKS."),
-    ("human", "Generate transition.")
+    ("system", """You are a licensed psychologist. You have finished the small talk.
+Now you need to gently transition to the clinical assessment.
+1. Acknowledge what the user just said briefly.
+2. Pivot smoothly to asking specific questions about their health and mood over the **last two weeks**.
+"""),
+    ("human", "The user just said: '{last_response}'. Generate the transition now.")
 ])
 
 probe_template = ChatPromptTemplate.from_messages([
-    ("system", "Ask a natural, open-ended question about '{item_label}' (Criteria: {hypothesis_text}). Anchor to the last 2 weeks."),
-    ("human", "Generate question.")
+    ("system", """You are a licensed psychologist conducting a clinical assessment.
+Your goal: Ask a supportive, open-ended question to assess '{item_label}'.
+Clinical Criteria: "{hypothesis_text}"
+
+Guidelines:
+1. **Timeframe:** You MUST anchor the question to the **last 2 weeks**.
+2. **Tone:** Be warm and conversational. Do not sound like a robotic survey.
+3. **Clarity:** Avoid complex medical jargon. Use simple, natural language.
+   - Example: Don't say "psychomotor retardation." Say "moving or speaking slowly."
+4. **Format:** Ask only ONE clear question."""),
+    ("human", "Generate the question.")
 ])
 
 # === STRICT PROMPT: ENSURES AGENT GIVES 0-3 ===
@@ -225,7 +248,8 @@ def run_session(llm, client_profile, pid):
 
     # --- RAPPORT ---
     try:
-        intro_text = intro_chain.invoke({})
+        # No name variable needed here
+        intro_text = intro_chain.invoke({}) 
         print(f"\n{AI_NAME}: {intro_text}")
         global_turn_index += 1
         transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "greeting", "text": intro_text})
@@ -235,12 +259,14 @@ def run_session(llm, client_profile, pid):
         global_turn_index += 1
         transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "greeting_reply", "text": part_reply})
         
-        trans_text = transition_chain.invoke({})
+        # TRANSITION (Pass the last response so it makes sense!)
+        trans_text = transition_chain.invoke({"last_response": part_reply})
         print(f"{AI_NAME}: {trans_text}")
         global_turn_index += 1
         transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "intro_transition", "text": trans_text})
+        
     except Exception as e:
-        print(f"Error during Intro: {e}")
+        print(f"Error during Intro/Rapport: {e}")
 
     # --- PHQ-8 LOOP ---
     PHQ8_HYPOTHESES = [
