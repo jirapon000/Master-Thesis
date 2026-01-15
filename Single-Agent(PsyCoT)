@@ -1,3 +1,4 @@
+
 import os
 import json
 import argparse
@@ -16,7 +17,7 @@ load_dotenv()
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # ================= CONFIGURATION =================
-AI_NAME = "LLM Psychologist (Single Agent + PsyCoT)"
+AI_NAME = "LLM Psychologist (Single Agent Baseline)"
 PARTICIPANT_NAME = "Participant"
 LLM_MODEL = "gpt-4o-mini"
 LLM_TEMPERATURE = 0.7
@@ -82,7 +83,8 @@ Guidelines:
     ("human", "Generate the question.")
 ])
 
-# === PSYCOT TEMPLATE: STEP-BY-STEP REASONING ===
+
+# === PSYCOT TEMPLATE (The Brain) ===
 psycot_template = ChatPromptTemplate.from_messages([
     ("system", """You are a licensed psychologist conducting a PHQ-8 assessment using **Psychological Chain-of-Thought (PsyCoT)**.
 
@@ -92,40 +94,42 @@ psycot_template = ChatPromptTemplate.from_messages([
 The participant has just answered your question.
 
 YOUR TASK:
-Reason step-by-step through the following clinical logic chain before making a decision.
+Reason step-by-step through the following clinical logic chain.
 
-**Step 1: Observation**
-- What did the participant explicitly say?
-- Are there specific mentions of frequency (e.g., "every day", "half the days")?
-- Does the answer address the timeframe (last 2 weeks)?
+**Step 1: Observation (Domain Scan)**
+Analyze the participant's response specifically against these three domains:
+1. **Relevance:** Did they answer the specific question asked?
+2. **Symptom Clarity (Vagueness):** Is the presence/frequency clear?
+3. **Timeframe:** Does the answer explicitly apply to the **LAST 2 WEEKS**?
 
-**Step 2: Assessment**
-- Does this input confirm or deny the symptom: "{item_label}"?
+**Step 2: Assessment (Sufficiency Check)**
+- Does this input confirm or deny the symptom?
 - Is the information complete enough to score?
 
-**Step 3: Strategy**
-- If answer is VAGUE/AMBIGUOUS or MISSING TIMEFRAME -> Decide **FOLLOW_UP**.
+**Step 3: Strategy (Decision)**
+- If answer is VAGUE, AMBIGUOUS, or MISSING TIMEFRAME -> Decide **FOLLOW_UP**.
 - If answer is CLEAR -> Decide **NEXT_ITEM** and assign **Score**.
 
 **Step 4: Response Generation**
-- If following up, write a **conversational probe** to clarify the missing info.
+- If following up: Write a probe targeting the missing domain.
 
 **Step 5: Scoring (Mandatory if NEXT_ITEM)**
 - 0 = Not at all
-- 1 = Several days
-- 2 = More than half the days
-- 3 = Nearly every day
+- 1 = Several days (mild)
+- 2 = More than half the days (moderate)
+- 3 = Nearly every day (severe)
 
-Output strictly in JSON format:
+OUTPUT FORMAT (JSON ONLY):
 {{
-  "step1_observation": "...",
-  "step2_assessment": "...",
-  "step3_strategy": "...",
+  "step1_observation": "Analysis of domains...",
+  "step2_assessment": "Sufficiency check...",
+  "step3_strategy": "Reasoning for decision...",
   "decision": "FOLLOW_UP" or "NEXT_ITEM",
-  "score": 0, 1, 2, or 3 (Only if NEXT_ITEM, else null),
   "detected_missing_domain": "none", "vagueness", "timeframe", or "relevance",
-  "question": "Your conversational follow-up here (only if decision is FOLLOW_UP)"
-}}"""),
+  "score": (INTEGER 0, 1, 2, or 3. Return null if FOLLOW_UP),
+  "question": "Follow-up question (if needed)"
+}}
+"""),
     ("human", "Conversation History:\n{history}")
 ])
 
@@ -195,22 +199,25 @@ def simulate_client_answer(
     severity_hint = symptom_block.get("severity_hint", "none")
     
     # 2. Determine Flaw (Thesis Logic)
-    flaw_injected = "none"
+    flaw_injected = "none" #can change difficulty 
     style_instruction = "Speak naturally."
     
     if difficulty == "easy":
         style_instruction = "Give a clear, direct answer."
     elif difficulty == "medium":
-        style_instruction = "Speak naturally, mostly clear."
+        style_instruction = "Paraphrase the symptom in your own words. Use everyday language and avoid repeating the exact terms from the question."
     elif difficulty == "hard":
         flaw_type = random.choice(["vagueness", "timeframe", "relevance"])
         flaw_injected = flaw_type
         if flaw_type == "vagueness":
-            style_instruction = "Be VAGUE. Use words like 'sort of', 'maybe'. Don't be clear."
+            style_instruction = "Be VAGUE. Use words like 'sort of', 'maybe'. Don't be clear and Do NOT give any specific details on symptoms."
         elif flaw_type == "timeframe":
             style_instruction = "Talk about the PAST (childhood/years ago) or just TODAY. Ignore 'last 2 weeks'."
         elif flaw_type == "relevance":
-            style_instruction = "Go OFF-TOPIC. Answer partially then switch to the weather or politics."
+            style_instruction = ("Go OFF-TOPIC. Pick a keyword from the question (like 'sleep' or 'food') and talk about a hobby, object, or story related to that word instead of your symptoms. "
+                "(Example: If asked about appetite, talk about a recipe you cooked. If asked about sleep, talk about your bed sheets). "
+                "Do NOT answer how you actually feel."
+            )
 
     # 3. Prompt
     profile_snippet = get_style_snippet(client_profile)
@@ -230,11 +237,12 @@ Question: "{question_text}"
         return "I'm not sure.", "error"
 
 # ================= MAIN LOGIC =================
+# ================= MAIN LOGIC =================
 def run_session(llm, client_profile, pid):
     print(f"\n{AI_NAME} Started for PID {pid}...\n")
     
     # --- SETUP DIRECTORIES ---
-    base_folder = "single-agent-psycot"
+    base_folder = "single-agent-PsyCoT"
     dirs = {
         "evidence": os.path.join(base_folder, "Evidence"),
         "transcript": os.path.join(base_folder, "Transcript"),
@@ -254,7 +262,7 @@ def run_session(llm, client_profile, pid):
     rapport_chain = rapport_template | llm | str_parser
     transition_chain = transition_template | llm | str_parser
     probe_chain = probe_template | llm | str_parser
-    assessment_chain = psycot_template | llm | json_parser  # <--- USING PSYCOT
+    assessment_chain = psycot_template | llm | json_parser
 
     # Logs
     transcript = []
@@ -269,6 +277,7 @@ def run_session(llm, client_profile, pid):
 
     # --- RAPPORT ---
     try:
+        # No name variable needed here
         intro_text = intro_chain.invoke({}) 
         print(f"\n{AI_NAME}: {intro_text}")
         global_turn_index += 1
@@ -279,6 +288,7 @@ def run_session(llm, client_profile, pid):
         global_turn_index += 1
         transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "greeting_reply", "text": part_reply})
         
+        # TRANSITION (Pass the last response so it makes sense!)
         trans_text = transition_chain.invoke({"last_response": part_reply})
         print(f"{AI_NAME}: {trans_text}")
         global_turn_index += 1
@@ -305,7 +315,7 @@ def run_session(llm, client_profile, pid):
 
     # TESTING SETTINGS
     DIFFICULTY_OPTIONS = ["easy", "medium", "hard"]
-    DIFFICULTY_WEIGHTS = [0.2, 0.5, 0.3] 
+    DIFFICULTY_WEIGHTS = [0.1, 0.5, 0.4] 
 
     for idx, h in enumerate(PHQ8_HYPOTHESES):
         shown = idx + 1
@@ -338,7 +348,6 @@ def run_session(llm, client_profile, pid):
                 "evidence_supporting_id": f"{item_id}_E1", "text": reply_text, "followup_asked": False
             })
 
-            # 3. DECISION (PASS 1)
             history_str = f"Psychologist: {opener}\nParticipant: {reply_text}"
             decision_data = assessment_chain.invoke({
                 "item_index": shown, "item_label": label, "hypothesis_text": hyp_text, "history": history_str
@@ -346,15 +355,17 @@ def run_session(llm, client_profile, pid):
             
             decision = decision_data.get("decision", "NEXT_ITEM")
             
-            # --- CONSTRUCT PSYCOT TRACE ---
-            s1 = decision_data.get("step1_observation", "")
-            s2 = decision_data.get("step2_assessment", "")
-            s3 = decision_data.get("step3_strategy", "")
-            full_trace = f"[Observation]: {s1} | [Assessment]: {s2} | [Strategy]: {s3}"
+            # Capture PsyCoT Thoughts (Pass 1)
+            thought = (
+                f"Observation: {decision_data.get('step1_observation', '')} | "
+                f"Assessment: {decision_data.get('step2_assessment', '')} | "
+                f"Strategy: {decision_data.get('step3_strategy', '')}"
+            )
             
             detected_flaw = decision_data.get("detected_missing_domain", "none").lower()
             score = parse_score(decision_data.get("score"))
             
+            # Log Analysis (Pass 1)
             bot_caught_it = False
             if flaw_injected == "none":
                 if decision == "NEXT_ITEM": bot_caught_it = True
@@ -370,11 +381,10 @@ def run_session(llm, client_profile, pid):
                 "Participant_Text": reply_text
             })
 
-            print(f"  -> PsyCoT Trace: {full_trace}")
-            transcript.append({"turn_index": global_turn_index, "speaker": "Agent_Internal_Monologue", "text": full_trace})
-            agent_thoughts.append({"item_index": shown, "turn_index": global_turn_index, "decision": decision, "score": score, "full_trace": full_trace})
+            transcript.append({"turn_index": global_turn_index, "speaker": "Agent_Internal_Monologue", "text": thought})
+            agent_thoughts.append({"item_index": shown, "turn_index": global_turn_index, "decision": decision, "score": score, "thought": thought})
 
-            # 4. FOLLOW-UP
+            # 4. FOLLOW-UP (Strict Linear Logic: ONE CHANCE ONLY)
             if decision == "FOLLOW_UP":
                 evidence_log[f"Item {shown}"]["supporting"][-1]["followup_asked"] = True
                 followup_q = decision_data.get("question", "Could you say more?")
@@ -382,6 +392,7 @@ def run_session(llm, client_profile, pid):
                 global_turn_index += 1
                 transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "followup_question", "text": followup_q})
 
+                # Get 2nd Answer
                 reply_text_2, _ = simulate_client_answer(
                     item_id, shown, label, followup_q, client_profile, llm,
                     difficulty="medium", is_followup=True
@@ -390,38 +401,49 @@ def run_session(llm, client_profile, pid):
                 global_turn_index += 1
                 transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "followup_answer", "text": reply_text_2})
 
-                # SECOND PASS (PsyCoT)
+                # FORCE SCORE INSTRUCTION (The "System Critical" prompt)
                 history_str_2 = (
                     f"{history_str}\n"
                     f"Psychologist: {followup_q}\n"
-                    f"Participant: {reply_text_2}"
+                    f"Participant: {reply_text_2}\n"
+                    f"(SYSTEM CRITICAL: This is the final interaction. You CANNOT ask another follow-up.\n"
+                    f"Even if the info is vague, you MUST make your best clinical estimate and assign a score (0-3) now.\n"
+                    f"Decision MUST be 'NEXT_ITEM'.)"
                 )
 
                 decision_data_2 = assessment_chain.invoke({
                     "item_index": shown, "item_label": label, "hypothesis_text": hyp_text, "history": history_str_2
                 })
                 
-                # Update Trace for Second Pass
-                s1_2 = decision_data_2.get("step1_observation", "")
-                s2_2 = decision_data_2.get("step2_assessment", "")
-                full_trace = f"(Pass 2) [Observation]: {s1_2} | [Assessment]: {s2_2}"
+                # Capture PsyCoT Thoughts (Pass 2)
+                thought2 = (
+                    f"Observation: {decision_data_2.get('step1_observation', '')} | "
+                    f"Assessment: {decision_data_2.get('step2_assessment', '')} | "
+                    f"Strategy: {decision_data_2.get('step3_strategy', '')}"
+                )
                 
                 new_score = parse_score(decision_data_2.get("score"))
                 if new_score is not None: score = new_score
                 decision = "RESOLVED_FOLLOW_UP"
+                
+                # Log Thought 2
+                agent_thoughts.append({"item_index": shown, "turn_index": global_turn_index, "decision": decision, "score": score, "thought": thought2})
+                # We update the 'thought' variable so the final explanation uses the latest reasoning
+                thought = thought2 
             
             # --- FINAL SCORE PROCESSING ---
             if score is None:
-                print("  [FAILURE] Agent failed to produce a score.")
+                print(f"  [FAILURE] Agent failed to score Item {shown}.")
+                score = -1 
             else:
                 total_score += score
                 
             print(f"  -> Agent Decision: {decision} | Final Score: {score}")
 
             final_scores.append({"Item ID": item_id, "Item Label": label, "Score": score})
-            scoring_explanations.append({"item_id": item_id, "label": label, "score": score, "explanation": full_trace})
+            scoring_explanations.append({"item_id": item_id, "label": label, "score": score, "explanation": thought})
 
-            # INSTANT SAVE
+            # INSTANT SAVE (BACKUP)
             analysis_path = os.path.join(dirs["analysis"], f"Analysis_{pid}.csv")
             with open(analysis_path, "w", newline="", encoding="utf-8") as f:
                 fieldnames = ["PID", "Item", "Turn", "Injected_Flaw", "Detected_Flaw", "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"]
@@ -430,13 +452,12 @@ def run_session(llm, client_profile, pid):
                 writer.writerows(analysis_log)
 
         except Exception as e:
-            print(f"CRITICAL ERROR on Item {item_id}: {e}")
-            continue
+            print(f"Error on Item {shown}: {e}")
 
     # --- END ---
     final_scores.append({"Item ID": "TOTAL", "Item Label": "PHQ-8 SUM", "Score": total_score})
     print(f"{AI_NAME}: Assessment Complete.")
-    
+
     # Save Final
     with open(os.path.join(dirs["evidence"], f"Evidence_{pid}.json"), "w", encoding="utf-8") as f: json.dump(evidence_log, f, indent=2)
     with open(os.path.join(dirs["transcript"], f"Transcript_{pid}.jsonl"), "w", encoding="utf-8") as f: 
