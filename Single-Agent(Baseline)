@@ -90,6 +90,9 @@ Current Item: {item_index}: "{item_label}" (Criteria: {hypothesis_text})
 TASK:
 1. Analyze the answer for clarity and relevance.
 2. Check for MISSING DOMAINS (vagueness, timeframe, relevance).
+   - **vagueness**: The user is ambiguous ("sort of", "maybe", "I guess") or lacks detail of the symptoms.
+   - **timeframe**: The user talks about the wrong time (e.g., "years ago", "childhood", "just today") instead of the **last 2 weeks**.
+   - **relevance**: The user changes the subject, dodges the question, or talks about unrelated topics to the questions being asked (e.g., weather, politics).
 3. **MANDATORY SCORING**: You MUST assign an integer score (0-3) if the answer is clear.
    - 0 = Not at all
    - 1 = Several days
@@ -174,22 +177,25 @@ def simulate_client_answer(
     severity_hint = symptom_block.get("severity_hint", "none")
     
     # 2. Determine Flaw (Thesis Logic)
-    flaw_injected = "none"
+    flaw_injected = "none" #can change difficulty 
     style_instruction = "Speak naturally."
     
     if difficulty == "easy":
         style_instruction = "Give a clear, direct answer."
     elif difficulty == "medium":
-        style_instruction = "Speak naturally, mostly clear."
+        style_instruction = "Paraphrase the symptom in your own words. Use everyday language and avoid repeating the exact terms from the question."
     elif difficulty == "hard":
         flaw_type = random.choice(["vagueness", "timeframe", "relevance"])
         flaw_injected = flaw_type
         if flaw_type == "vagueness":
-            style_instruction = "Be VAGUE. Use words like 'sort of', 'maybe'. Don't be clear."
+            style_instruction = "Be VAGUE. Use words like 'sort of', 'maybe'. Don't be clear and Do NOT give any specific details on symptoms."
         elif flaw_type == "timeframe":
             style_instruction = "Talk about the PAST (childhood/years ago) or just TODAY. Ignore 'last 2 weeks'."
         elif flaw_type == "relevance":
-            style_instruction = "Go OFF-TOPIC. Answer partially then switch to the weather or politics."
+            style_instruction = ("Go OFF-TOPIC. Pick a keyword from the question (like 'sleep' or 'food') and talk about a hobby, object, or story related to that word instead of your symptoms. "
+                "(Example: If asked about appetite, talk about a recipe you cooked. If asked about sleep, talk about your bed sheets). "
+                "Do NOT answer how you actually feel."
+            )
 
     # 3. Prompt
     profile_snippet = get_style_snippet(client_profile)
