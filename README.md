@@ -16,12 +16,17 @@ Designed to mimic the cognitive process of a human clinician, the system employs
 The workflow is divided into four chronological stages: Interaction, Analysis, Navigation, and Final Assessment.
 
 1. The Agents
+**Question Agent** - Facilitates the dialogue, asking PHQ-8 items and follow-up probes.
+**Clarification Agent**(Detection) - Monitors for "Missing Key Domains" (Timeframe, Severity, Relevance). Calculates the MissingRate to trigger specific follow-ups.
+**Alignment Agent**(Detection) - Monitors for logical consistency. Uses an Item-Dependency Map to verify that symptoms match (e.g., Item 1 links to Items 2, 4, 7, 8).
+**Navigation Agent**(Control) - The logic gatekeeper. Evaluates signals from detection agents to decide whether to loop back for clarification or proceed to the next item.
+**Scoring Agent**(Assessment) - Aggregates verified evidence to produce the final PHQ-8 severity score.
 
 2. Operational Workflow
 The system actively halts linear progression if validity criteria are not met.
-1) **Input**: User responds to a PHQ-8 item.
-2) **Analysis**: Clarification and Alignment agents scan the response.
-3) **Decision**:
+**Input**: User responds to a PHQ-8 item.
+**Analysis**: Clarification and Alignment agents scan the response.
+**Decision**:
 * If Ambiguous/Contradictory: Navigation Agent triggers a Clarification Loop.
 * If Valid: Navigation Agent authorizes the Scoring Agent to log the evidence and proceed.
 
