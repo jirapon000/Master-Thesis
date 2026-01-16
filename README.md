@@ -15,13 +15,23 @@ Designed to mimic the cognitive process of a human clinician, the system employs
 ## 🏗️ System Architecture
 The workflow is divided into four chronological stages: Interaction, Analysis, Navigation, and Final Assessment.
 
+1. The Agents
+
+2. Operational Workflow
+The system actively halts linear progression if validity criteria are not met.
+1) **Input**: User responds to a PHQ-8 item.
+2) **Analysis**: Clarification and Alignment agents scan the response.
+3) **Decision**:
+* If Ambiguous/Contradictory: Navigation Agent triggers a Clarification Loop.
+* If Valid: Navigation Agent authorizes the Scoring Agent to log the evidence and proceed.
+
 ## 🧪 Simulation & Testing Protocol
 To rigorously evaluate the system without risking live patients, we implement a *Simulated Client* pipeline based on the *DAIC-WOZ dataset*.
 
 **Patient Profile Generation**
 Raw transcripts are processed into structured Participant Profile Cards covering 7 clinical domains (Affective, Behavioral, Symptoms, etc.).
 
-Response Style Hierarchies (Stress Testing)
+**Response Style Hierarchies**
 To test the system's robustness against real-world linguistic variability, the simulated clients operate on three difficulty levels:
 * Level 1 (Original): Uses direct text from the transcript.
 * Level 2 (Paraphrase): Restructures sentences to test semantic understanding.
