@@ -1,0 +1,884 @@
+
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import json
+import argparse
+import datetime
+import random
+import random
+import csv
+import torch
+import torch.nn.functional as F
+from typing import TypedDict, Annotated, List, Dict, Any, Union, Literal
+from dotenv import load_dotenv
+
+# --- LANGCHAIN & LANGGRAPH IMPORTS ---
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
+from langgraph.graph import StateGraph, END
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+load_dotenv()
+
+# ================= CONFIG =================
+AI_NAME = "Multi-Agent System (5-Agent Architecture)"
+PARTICIPANT_NAME = "Participant"
+LLM_MODEL = "gpt-4o-mini"
+LLM_TEMPERATURE = 0.7
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Entailment Config (MATCHING BASELINE)
+ENTAILMENT_MODEL_NAME = "roberta-large-mnli"
+ENTAIL_THRESHOLD = 0.7
+CONTRADICT_THRESHOLD = 0.7
+NEUTRAL_THRESHOLD = 0.6
+
+# ================= GLOBAL DATA =================
+PHQ8_HYPOTHESES = [
+    {"item_id": "I1", "label": "Anhedonia",       "text": "Little interest or pleasure in doing things."},
+    {"item_id": "I2", "label": "Depressed mood",  "text": "Feeling depressed, down, or hopeless."},
+    {"item_id": "I3", "label": "Sleep problems",  "text": "Trouble falling or staying asleep, or sleeping too much."},
+    {"item_id": "I4", "label": "Fatigue",         "text": "Feeling tired or having little energy."},
+    {"item_id": "I5", "label": "Appetite change", "text": "Poor appetite or overeating."},
+    {"item_id": "I6", "label": "Self-worth",      "text": "Feeling bad about yourself or that you are a failure."},
+    {"item_id": "I7", "label": "Concentration",   "text": "Trouble concentrating on things."},
+    {"item_id": "I8", "label": "Psychomotor",     "text": "Moving or speaking so slowly (or being fidgety/restless)."}
+]
+
+SYMPTOM_KEY_BY_ITEM_ID: Dict[str, str] = {
+    "I1": "anhedonia (loss of interest/pleasure)",
+    "I2": "low mood / hopelessness",
+    "I3": "sleep disturbance",
+    "I4": "fatigue / low energy",
+    "I5": "appetite/weight change",
+    "I6": "self-worth/guilt",
+    "I7": "concentration problems",
+    "I8": "psychomotor change (slowing or agitation)",
+}
+
+# ================= ENTAILMENT MODEL SETUP =================
+print(f"Loading entailment model: {ENTAILMENT_MODEL_NAME} ...")
+ENT_TOKENIZER = AutoTokenizer.from_pretrained(ENTAILMENT_MODEL_NAME)
+ENT_MODEL = AutoModelForSequenceClassification.from_pretrained(ENTAILMENT_MODEL_NAME)
+ENT_MODEL.eval()
+
+def compute_nli_probs(premise: str, hypothesis: str) -> Dict[str, float]:
+    premise = (premise or "").strip()
+    if not premise: return {"p_contradict": 0.0, "p_neutral": 0.0, "p_entail": 0.0}
+    inputs = ENT_TOKENIZER(premise, hypothesis, return_tensors="pt", truncation=True, max_length=512)
+    with torch.no_grad():
+        logits = ENT_MODEL(**inputs).logits
+    probs = F.softmax(logits, dim=-1)[0].tolist()
+    return {"p_contradict": probs[0], "p_neutral": probs[1], "p_entail": probs[2]}
+
+# ================= HELPERS =================
+class AlignmentHelper:
+    def __init__(self, json_path):
+        self.map = {}
+        if os.path.exists(json_path):
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            self.map = {item['item_id']: item for item in data}
+        else:
+            print(f"Warning: {json_path} not found. Alignment will be generic.")
+
+    def get_focused_history(self, current_item_id_str, evidence_data):
+        try:
+            curr_id = int(current_item_id_str.replace("I", ""))
+        except:
+            return "No alignment context available."
+
+        if curr_id not in self.map:
+            return "No specific alignment rules for this item."
+
+        specs = self.map[curr_id]
+        rule = specs['rule']
+        related_ids = specs['check_against']
+
+        relevant_answers = []
+        for rid in related_ids:
+            key = f"Item {rid}"
+            if key in evidence_data:
+                found_text = None
+                for cat in ["supporting", "contradicting", "neutral"]:
+                    if evidence_data[key][cat]:
+                        found_text = evidence_data[key][cat][-1]["text"]
+                        break
+                if found_text:
+                    relevant_answers.append(f"Item {rid}: {found_text}")
+
+        history_text = "\n".join(relevant_answers) if relevant_answers else "No relevant previous answers yet."
+        return f"--- ALIGNMENT RULE ---\n{rule}\n\n--- RELEVANT HISTORY ---\n{history_text}"
+
+alignment_helper = AlignmentHelper("phq8_alignment_map.json")
+
+# 2. Participant Simulator Response
+# 2. SIMULATED CLIENT ANSWER (Updated for INTRO support)
+def simulate_client_answer(
+    item_id: str,
+    item_index: int,
+    item_label: str,
+    hypothesis_text: str,
+    question_text: str,
+    client_profile: Dict[str, Any],
+    llm: ChatOpenAI,
+    is_followup: bool = False,
+) -> str:
+    """
+    Generate a simulated client answer with DYNAMIC difficulty.
+    It randomly selects a difficulty level based on defined weights.
+    """
+    # --- 1. DYNAMIC DIFFICULTY SELECTION ---
+    DIFFICULTY_MODES = ["level1", "level2", "level3"]
+    # Weights: 20% Direct, 50% Paraphrase, 30% Ambiguous
+    WEIGHTS = [0.2, 0.5, 0.3] 
+    
+    selected_difficulty = random.choices(DIFFICULTY_MODES, weights=WEIGHTS, k=1)[0]
+
+    if selected_difficulty == "level3":  # HARD / AMBIGUOUS
+        diff_instruction = (
+            "**Internal Monologue: You are feeling unsure or guarded.**\n"
+            "- Be vague, indecisive, or non-committal.\n"
+            "- Use words like 'maybe', 'sort of', 'sometimes', 'I guess'.\n"
+            "- Do NOT give specific numbers or clear timeframes yet.\n"
+            "- Force the interviewer to dig deeper."
+        )
+    elif selected_difficulty == "level2": # MEDIUM / PARAPHRASE
+        diff_instruction = (
+            "**Internal Monologue: You are speaking naturally.**\n"
+            "- Do NOT use clinical terms.\n"
+            "- Use metaphors, stories, or descriptions (e.g., 'I feel heavy' instead of 'depressed').\n"
+            "- The meaning is there, but the interviewer has to listen closely."
+        )
+    else: # LEVEL 1 (EASY / DIRECT)
+        diff_instruction = (
+            "**Internal Monologue: You want to be understood clearly.**\n"
+            "- Be helpful and explicit.\n"
+            "- Directly answer the question with a clear frequency or duration."
+        )
+
+    # --- 2. EXTRACT PROFILE & STYLE (Restored) ---
+    persona = client_profile.get("persona", {})
+    interaction_style = persona.get("interaction_style", {})
+    clinical_signals = (client_profile.get("clinical_signals", {}) or {}).get("symptoms", {})
+    behavioral_features = client_profile.get("behavioral_features", {})
+
+    style_label = interaction_style.get("style_label", "")
+    style_scores = interaction_style.get("scores", {})
+    style_features = interaction_style.get("features", {})
+    style_evidence = interaction_style.get("evidence_quotes", []) or []
+
+    # --- LOGIC FOR INTRO VS. CLINICAL ITEMS ---
+    if item_id == "INTRO":
+        # Intro Case: No symptom lookup needed
+        symptom_key = "general_wellbeing"
+        symptom_block = {}
+        special_instruction = (
+            "This is the Introduction. Ignore clinical symptoms. "
+            "Just answer the greeting naturally based on your persona, "
+            "interaction style, and current mood."
+        )
+    else:
+        # Standard Case: Look up the specific symptom
+        symptom_key = SYMPTOM_KEY_BY_ITEM_ID.get(item_id, "")
+        symptom_block = clinical_signals.get(symptom_key, {}) if clinical_signals else {}
+        
+        present = symptom_block.get("present", "uncertain")
+        severity_hint = symptom_block.get("severity_hint", "uncertain")
+        symptom_quotes = symptom_block.get("evidence_quotes", []) or []
+        
+        special_instruction = (
+            f"Ground the content in the clinical_signals for this symptom:\n"
+            f"  - Symptom Status: {present}\n"
+            f"  - Severity Hint: {severity_hint}\n"
+            f"  - Evidence Quotes (Use as inspiration): {symptom_quotes}\n"
+            f"  - Focus on the LAST TWO WEEKS."
+        )
+
+    # Construct the Profile Snippet (Safe for LLM context)
+    profile_snippet = {
+        "persona": {
+            "demographics": persona.get("demographics", {}),
+            "interaction_style": {
+                "style_label": style_label,
+                "scores": style_scores,
+                "features": style_features,
+                "evidence_quotes": style_evidence[:5],
+            },
+        },
+        "clinical_signals": {
+            "symptoms": {
+                symptom_key: symptom_block
+            }
+        },
+        "behavioral_features": behavioral_features,
+    }
+
+    role_tag = "follow-up" if is_followup else "initial"
+    
+    # --- FINAL PROMPT ---
+    prompt = f"""
+You are role-playing a client in a PHQ-8 style clinical intake interview.
+
+Here is the *client profile* (JSON-like, do NOT quote it back directly):
+{json.dumps(profile_snippet, ensure_ascii=False, indent=2)}
+
+The interviewer just asked this {role_tag} question:
+\"\"\"{question_text}\"\"\"
+
+Instructions for your reply:
+- Answer AS THIS CLIENT, in first person ("I").
+- Keep your tone consistent with interaction_style.style_label.
+- {special_instruction}
+- Use a natural, conversational style.
+- Length: 1–3 short sentences.
+- Do NOT mention that you are a profile, a dataset, or an AI.
+
+Now write ONLY the client's answer.
+"""
+    try:
+        resp = llm.invoke(prompt)
+        text = (getattr(resp, "content", "") or "").strip()
+        return text if text else "..."
+    except Exception as e:
+        print(f"Simulation Error: {e}")
+        return "I'm not sure."
+
+# ================= STATE DEFINITION =================
+class AgentState(TypedDict):
+    # Context
+    participant_profile: str
+    history: List[str]
+    transcript: List[Dict]
+    
+    # Flow
+    current_item_index: int
+    current_item_id: str
+    current_item_label: str
+    current_hypothesis: str
+    
+    # Agent Outputs
+    last_question: str
+    last_answer: str
+    
+    # Reports
+    clarification_status: str
+    clarification_reason: str
+    alignment_status: str
+    alignment_reason: str
+    
+    # Navigation & Control
+    next_action: str
+    nav_instruction: str
+    clarification_missing_domains: List[str]
+    
+    # Data Collection
+    items_evidence: Dict[str, Any]
+    final_scores: List[Dict]
+    scoring_explanations: List[Dict]
+    agent_thoughts: List[Dict]
+
+    # NEW FIELD: Track how many times we've looped on the current item
+    followup_count: int
+
+# ================= PROMPTS (5 AGENTS) =================
+
+# 1. Question Agent
+question_template = ChatPromptTemplate.from_messages([
+    ("system", """You are a warm, empathetic human psychologist having a supportive conversation.
+**You are NOT a survey bot.** Your goal is to assess the patient naturally.
+
+**CRITICAL CONSTRAINTS:**
+1. **One Goal at a Time:** If the instruction asks for *Timeframe*, ask ONLY about Timeframe. Do not combine multiple questions (e.g., "How long has this been happening and how often?").
+   - *Reason:* Double-barreled questions confuse the patient.
+2. **Short & Sweet:** Keep your response to 1-2 sentences maximum.
+3. **No Lists:** Never ask the patient to "rate" or "select from a list" unless explicitly forced.
+
+**Current Context:**
+- **Topic:** {item_label}
+- **Clinical Goal:** {hypothesis}
+- **MANAGER INSTRUCTION:** "{instruction}"
+  *(This instruction is your command. You MUST execute it precisely.)*
+
+**FEW-SHOT EXAMPLES (How to turn Instructions into Conversational Probes):**
+
+**Scenario A: Opening a New Topic**
+* *Instruction:* "Start this item."
+* ✅ *Conversational:* "Lately, have you found yourself tossing and turning at night, or waking up way too early and unable to get back to sleep?"
+
+**Scenario B: Missing Domain - TIMEFRAME (Single Focus)**
+* *Instruction:* "Ask a single follow-up to clarify ONLY the TIMEFRAME."
+* ❌ *Bad (Too many Qs):* "How long has this been going on, and is it every day?"
+* ✅ *Good (Focused):* "That sounds tough. Has this been going on for the last couple of weeks, or is it something new?"
+
+**Scenario C: Missing Domain - VAGUENESS (Single Focus)**
+* *Instruction:* "Ask a single follow-up to clarify ONLY the VAGUENESS."
+* ❌ *Bad (Survey style):* "Rate your frequency from 0 to 3."
+* ✅ *Good (Focused):* "Sorry to hear that. Is this happening pretty much every night, or just a few times a week?"
+     
+**Scenario D: Missing Domain - RELEVANCE (The Gentle Pivot)**
+* *Instruction:* "Ask a single follow-up to clarify ONLY the RELEVANCE."
+* ❌ *Bad (Rude):* "That is irrelevant. Answer the question about sleep."
+* ✅ *Good (Bridge & Pivot):* "I appreciate you sharing that context about your work. Just to bring it back to your sleep specifically—have you been able to get good rest lately?"
+* ✅ *Good (Bridge & Pivot):* "I understand completely. Focusing just on your energy levels right now, though—have you felt unusually drained during the day?"
+
+**STYLE GUIDELINES:**
+1. **Be Human & Soft:** Use empathy markers ("I appreciate you sharing that," "I see").
+2. **Avoid Clinical Jargon:** Never say "psychomotor agitation." Use "restless" or "fidgety."
+
+**YOUR TASK:**
+Based on the instruction **"{instruction}"**, write a short, 1-2 sentence **conversational probe**.
+"""),
+    ("human", "Conversation History:\n{history_str}")
+])
+
+# 2. Clarification Agent (Detection)
+clarification_template = ChatPromptTemplate.from_messages([
+    ("system", """You are the **Clarification Agent**.
+Your goal is to ensure the participant's answer is **clinically scorable**.
+Do NOT look for specific keywords. Use your judgment to determine if the meaning is clear.
+
+**CRITERIA GUIDELINES (Conceptual Checks):**
+
+**1. TIMEFRAME (The "Recency" Check)**
+* **Definition:** Does the participant imply this is a **current or recent** experience (relevant to the last ~2 weeks)?
+* **Pass:** The context suggests the feelings are active now or happened recently (e.g., "Since I lost my job," "Lately," "These days," or present tense descriptions).
+* **Fail:** The answer explicitly refers only to the distant past or effectively says "not anymore."
+
+**2. VAGUENESS (The "Scoring Discrimination" Check)**
+* **Definition:** Does the answer contain enough precision to distinguish between **"Several days" (Score 1)** and **"More than half the days" (Score 2)**?
+* **Pass (Scorable):** The participant describes a frequency or intensity that lands clearly in one bucket.
+  - *Examples of Logic:* A clear count ("3 days a week"), a definitive state ("It never stops"), or a clear comparison ("Most of the time").
+* **Fail (Ambiguous):** The answer straddles the line between categories, leaving you guessing.
+  - *Examples of Logic:* Non-committal words ("Sometimes," "It varies," "Here and there") that could theoretically mean 2 days OR 5 days. If you have to guess the score, it is VAGUE.
+
+**3. RELEVANCE (The "Topic" Check)**
+* **Definition:** Does the answer logically address the specific symptom asked about?
+* **Pass:** The response connects meaningfully to the symptom (even if indirectly).
+* **Fail:** The response is a complete non-sequitur or avoids the topic entirely.
+
+**OUTPUT FORMAT:**
+Return strict JSON using **DOUBLE QUOTES**.
+Include a `reason` explaining your decision based on the definitions above.
+Return a list of `missing_domains` for any FAILED criteria: `["timeframe", "vagueness", "relevance"]`.
+"""),
+    ("human", "Conversation History:\n{history_str}\n\nLatest Q: {question}\nLatest A: {answer}")
+])
+
+# 3. Alignment Agent
+alignment_template = ChatPromptTemplate.from_messages([
+    ("system", """You are the **Alignment Agent**.
+Check for consistency between the current answer and the patient's history.
+
+**OUTPUT FORMAT:**
+Return strict JSON using **DOUBLE QUOTES** only.
+Example: {{ "status": "CONSISTENT", "reason": "The patient previously said X..." }}
+"""),
+    ("human", "Answer: {answer}\nHistory: {history_str}")
+])
+
+# 4. Navigation Agent
+navigation_template = ChatPromptTemplate.from_messages([
+    ("system", """Decide next move.
+- If Missing/Conflict -> FOLLOW_UP.
+- Else -> SCORE_AND_NEXT.
+
+**OUTPUT FORMAT:**
+Return strict JSON using **DOUBLE QUOTES**.
+Example: {{ "next_action": "FOLLOW_UP", "instruction": "Clarify timeframe..." }}
+"""),
+    ("human", "Reports: Clarification={c_stat} ({c_reas}), Alignment={a_stat} ({a_reas})")
+])
+
+# 5. Scoring Agent
+scoring_template = ChatPromptTemplate.from_messages([
+    ("system", """Assign PHQ-8 score (0-3).
+
+**OUTPUT FORMAT:**
+Return strict JSON using **DOUBLE QUOTES**.
+Example: {{ "score": 2, "explanation": "Patient stated..." }}
+"""),
+    ("human", "History:\n{history_str}")
+])
+
+
+# ================= NODE FUNCTIONS =================
+llm = ChatOpenAI(model=LLM_MODEL, temperature=LLM_TEMPERATURE, api_key=OPENAI_API_KEY)
+json_parser = JsonOutputParser()
+str_parser = StrOutputParser()
+
+# 1. Question Node (UPDATED: "Getting to Know You" Intro)
+def question_node(state: AgentState):
+    idx = state["current_item_index"]
+    
+    # CASE A: INTRODUCTION (Item 0)
+    if idx == 0:
+        state["current_item_id"] = "INTRO"
+        state["current_item_label"] = "Introduction"
+        state["current_hypothesis"] = "Establish rapport."
+        
+        # LOGIC: Check if it's the very first turn or a follow-up intro turn
+        current_instr = state.get("nav_instruction", "")
+        
+        if current_instr == "Start introduction.":
+            # --- UPDATED INSTRUCTION ---
+            instruction = (
+                "Start the conversation warmly and casually, like you are getting to know a new acquaintance for the first time. "
+                "Do not mention you are an AI. "
+                "Ask a friendly, open-ended icebreaker to build comfort, such as 'Hi! It is nice to meet you. How has your week been going so far?'"
+            )
+        else:
+            # This handles the 2nd and 3rd intro questions (e.g., "Ask about their job")
+            instruction = current_instr
+    
+    # CASE B: PHQ-8 ITEMS (Items 1-8)
+    else:
+        list_idx = idx - 1
+        if list_idx < len(PHQ8_HYPOTHESES):
+            current_item = PHQ8_HYPOTHESES[list_idx]
+            state["current_item_id"] = current_item["item_id"]
+            state["current_item_label"] = current_item["label"]
+            state["current_hypothesis"] = current_item["text"]
+            
+        instruction = state.get("nav_instruction", "Start item.")
+
+    hist_str = "\n".join(state["history"][-6:])
+    
+    question = (question_template | llm | str_parser).invoke({
+        "item_label": state["current_item_label"],
+        "hypothesis": state["current_hypothesis"],
+        "instruction": instruction,
+        "history_str": hist_str
+    })
+    
+    print(f"\n👩‍⚕️ Psychologist ({state['current_item_id']}): {question}")
+    
+    new_hist = state["history"] + [f"Psychologist: {question}"]
+    
+    turn = {
+        "turn_index": len(state["transcript"])+1, 
+        "speaker": AI_NAME, 
+        "text": question, 
+        "role": "question",
+        "item_id": state["current_item_id"]
+    }
+    
+    return {
+        "last_question": question, 
+        "history": new_hist, 
+        "transcript": state["transcript"] + [turn],
+        "current_item_id": state["current_item_id"],
+        "current_item_label": state["current_item_label"],
+        "current_hypothesis": state["current_hypothesis"]
+    }
+
+# 2. Participant Node
+# 2. Participant Node (UPDATED)
+def participant_node(state: AgentState):
+    profile_obj = json.loads(state["participant_profile"])
+    is_followup_flag = state.get("followup_count", 0) > 0
+    
+    # No need to get difficulty from state anymore, the helper does it randomly.
+    answer = simulate_client_answer(
+        item_id=state["current_item_id"],
+        item_index=state["current_item_index"],
+        item_label=state["current_item_label"],
+        hypothesis_text=state["current_hypothesis"],
+        question_text=state["last_question"],
+        client_profile=profile_obj,
+        llm=llm,
+        is_followup=is_followup_flag
+    )
+    
+    print(f"👤 Participant: {answer}")
+    
+    new_hist = state["history"] + [f"Participant: {answer}"]
+    
+    turn = {
+        "turn_index": len(state["transcript"])+1, 
+        "speaker": PARTICIPANT_NAME, 
+        "text": answer, 
+        "role": "answer",
+        "item_id": state["current_item_id"]
+    }
+    
+    return {"last_answer": answer, "history": new_hist, "transcript": state["transcript"] + [turn]}
+
+# 3. Clarification Node
+def clarification_node(state: AgentState):
+    #SKIP CHECK FOR INTRO
+    if state["current_item_id"] == "INTRO":
+        return {
+            "clarification_status": "COMPLETE",
+            "clarification_reason": "Introduction phase.",
+            "clarification_missing_domains": []
+        }
+    
+    # Filter history for current item only (to avoid confusion)
+    current_id = state["current_item_id"]
+    relevant_turns = [t for t in state["transcript"] if t.get("item_id") == current_id]
+    
+    # Build focused history string
+    focused_hist_str = ""
+    for t in relevant_turns:
+        focused_hist_str += f"{t['speaker']}: {t['text']}\n"
+
+    res = (clarification_template | llm | json_parser).invoke({
+        "question": state["last_question"], 
+        "answer": state["last_answer"],
+        "history_str": focused_hist_str # <--- Now passing history
+    })
+    
+    missing = res.get("missing_domains", [])
+    
+    return {
+        "clarification_status": res.get("status", "COMPLETE"),
+        "clarification_reason": res.get("reason", ""),
+        "clarification_missing_domains": missing
+    }
+
+# 4. Alignment Node
+def alignment_node(state: AgentState):
+    smart_history_str = alignment_helper.get_focused_history(state["current_item_id"], state["items_evidence"])
+    
+    if "No relevant previous answers" in smart_history_str and len(state["history"]) > 0:
+        fallback_hist = "\n".join(state["history"][-4:])
+        smart_history_str += f"\n\n(General Context):\n{fallback_hist}"
+
+    res = (alignment_template | llm | json_parser).invoke({
+        "answer": state["last_answer"], 
+        "history_str": smart_history_str
+    })
+    return {"alignment_status": res.get("status", "CONSISTENT"), "alignment_reason": res.get("reason", "")}
+
+# 5. Navigation Node
+def navigation_node(state: AgentState):
+    missing_list = state.get("clarification_missing_domains", [])
+    current_retries = state.get("followup_count", 0)
+
+    # Initialize variable to prevent UnboundLocalError
+    style_guide = "Standard Follow-up" 
+
+    # 1. Ask Navigation Agent for opinion
+    res = (navigation_template | llm | json_parser).invoke({
+        "c_stat": state["clarification_status"], 
+        "c_reas": state["clarification_reason"],
+        "a_stat": state["alignment_status"], 
+        "a_reas": state["alignment_reason"]
+    })
+    
+    proposed_action = res.get("next_action", "SCORE_AND_NEXT")
+    base_instruction = res.get("instruction", "")
+
+    # 2. DECISION LOGIC
+    
+    # CASE A: Max Retries Hit -> Force Score
+    if proposed_action == "FOLLOW_UP" and current_retries >= 3:
+        print(f"   [Logic] 🛑 MAX RETRIES ({current_retries}) HIT -> Forcing Score...")
+        final_action = "SCORE_AND_NEXT"
+        final_instruction = "Move to scoring."
+        missing_list = [] 
+    
+    # CASE B: Normal Follow-Up (Only if something is actually missing)
+    elif proposed_action == "FOLLOW_UP" and missing_list:
+        final_action = "FOLLOW_UP"
+        
+        # I. Pick the Domain
+        if "relevance" in missing_list:
+            selected_domain = "relevance"
+        elif "timeframe" in missing_list:
+            selected_domain = "timeframe"
+        elif "vagueness" in missing_list:
+            selected_domain = "vagueness"
+        else:
+            selected_domain = missing_list[0]
+
+        # II. DEFINE STRATEGIES
+        ESCALATION_MAP = {
+            "vagueness": [
+                "Ask naturally.",
+                "Offer two clear options (e.g., 'Is it closer to just a couple of days, or more than half the week?').",
+                "Ask for a direct estimate (e.g., 'Would you say that is 3-4 days a week?')."
+            ],
+            "timeframe": [
+                "Ask naturally.",
+                "Be specific about the window. Ask explicitly if this has been happening in the 'last 2 weeks'.",
+                "Force a yes/no on recency. (e.g., 'Has this been a problem specifically within the last 14 days?')."
+            ],
+            "relevance": [
+                "Pivot gently back to the topic.",
+                "Be more direct. Acknowledge their point but explicitly ask about the symptom.",
+                "Directly link their story to the symptom. (e.g., 'Does that specific situation make you feel [Symptom]?')."
+            ]
+        }
+        
+        strategies = ESCALATION_MAP.get(selected_domain, ["Ask specifically."])
+        style_guide = strategies[min(current_retries, len(strategies)-1)]
+
+        # III. Construct Instruction
+        final_instruction = (
+            f"Clarify ONLY the {selected_domain.upper()}. "
+            f"{style_guide} "
+            f"{base_instruction}"
+        )
+    
+    # CASE C: Score or Empty Missing List
+    else:
+        # SAFETY CHECK: If Agent wants FOLLOW_UP but list is empty, FORCE SCORE.
+        if proposed_action == "FOLLOW_UP" and not missing_list:
+             print("   [Logic] ⚠️  Agent wanted Follow-Up but nothing is missing -> Forcing Score.")
+             final_action = "SCORE_AND_NEXT"
+             final_instruction = "Proceed to scoring."
+        else:
+             final_action = proposed_action
+             final_instruction = base_instruction
+
+    # 3. Print Logic Status
+    if final_action == "FOLLOW_UP":
+        print(f"   [Logic] ⚠️  MISSING: {missing_list} -> Strategy: {style_guide} (Attempt {current_retries + 1}/3)...")
+        new_followup_count = current_retries + 1
+    else:
+        print(f"   [Logic] ✅  COMPLETE -> Scoring...")
+        new_followup_count = current_retries 
+
+    # 4. ENTAILMENT
+    probs = compute_nli_probs(state["last_answer"], state["current_hypothesis"])
+    role = "neutral"
+    if probs["p_entail"] >= ENTAIL_THRESHOLD: role = "supporting"
+    elif probs["p_contradict"] >= CONTRADICT_THRESHOLD: role = "contradicting"
+    
+    items_data = state["items_evidence"]
+    item_key = f"Item {state['current_item_index'] + 1}"
+    
+    current_count = len(items_data[item_key][role]) + 1
+    evidence_id_key = f"evidence_{role}_id"
+    evidence_id_val = f"{state['current_item_id']}_{role}_E{current_count}"
+    
+    entry = {
+        evidence_id_key: evidence_id_val,   
+        "text": state["last_answer"],
+        "p_entail": round(probs["p_entail"], 4),
+        "p_contradict": round(probs["p_contradict"], 4),
+        "p_neutral": round(probs["p_neutral"], 4),
+        "followup_asked": (final_action == "FOLLOW_UP"),
+        "missing_domains": missing_list     
+    }
+    
+    if item_key in items_data:
+        items_data[item_key][role].append(entry)
+
+    # 5. Save & Return
+    thought = {
+        "item": state["current_item_id"],
+        "clarification": state["clarification_status"],
+        "missing": missing_list,
+        "decision": final_action,
+        "instruction": final_instruction
+    }
+
+    return {
+        "next_action": final_action, 
+        "nav_instruction": final_instruction, 
+        "agent_thoughts": state["agent_thoughts"] + [thought],
+        "items_evidence": items_data,
+        "followup_count": new_followup_count
+    }
+
+# 6. Scoring Node
+def scoring_node(state: AgentState):
+
+    # CASE A: INTRO PHASE (The Loop)
+    if state["current_item_id"] == "INTRO":
+        current_count = state.get("intro_turn_count", 0) + 1
+        
+        # --- CONFIG: How many intro questions? (Set to 3 for a 3-turn warmup) ---
+        INTRO_LIMIT = 3 
+        
+        if current_count < INTRO_LIMIT:
+            # STAY IN INTRO
+            if current_count == 1:
+                next_instr = "The patient answered your greeting. Now ask a polite follow-up question about their daily life, work, or recent events to build rapport."
+            else:
+                next_instr = "Ask one final general question to get to know them better before starting the assessment."
+                
+            return {
+                "final_scores": state["final_scores"],
+                "scoring_explanations": state["scoring_explanations"],
+                "current_item_index": 0, # <--- STAY AT 0
+                "intro_turn_count": current_count, # Increment count
+                "nav_instruction": next_instr,
+                "followup_count": 0
+            }
+        else:
+            # MOVE TO ITEM 1 (Transition)
+            return {
+                "final_scores": state["final_scores"],
+                "scoring_explanations": state["scoring_explanations"],
+                "current_item_index": 1, # <--- MOVE TO ITEM 1
+                "intro_turn_count": current_count,
+                # The instruction here guides the transition into the first symptom
+                "nav_instruction": "Smoothly transition from the small talk into the first topic: Anhedonia (lack of interest).",
+                "followup_count": 0
+            }
+            
+    # CASE B: NORMAL SCORING (Keep existing logic)
+    
+    # Filter history for current item only
+    current_id = state["current_item_id"]
+    relevant_turns = [t for t in state["transcript"] if t.get("item_id") == current_id]
+    
+    focused_history = ""
+    for t in relevant_turns:
+        focused_history += f"{t['speaker']}: {t['text']}\n"
+        
+    if not focused_history:
+        focused_history = state["last_question"] + "\n" + state["last_answer"]
+
+    res = (scoring_template | llm | json_parser).invoke({
+        "item_label": state["current_item_label"],
+        "hypothesis": state["current_hypothesis"],
+        "history_str": focused_history 
+    })
+    score = res.get("score", 0)
+    
+    final_s = {
+        "Item ID": state["current_item_id"], 
+        "Item Label": state["current_item_label"], 
+        "Score": score
+    }
+    
+    expl = {"item_id": state["current_item_id"], "score": score, "explanation": res.get("explanation", "")}
+    
+    return {
+        "final_scores": state["final_scores"] + [final_s],
+        "scoring_explanations": state["scoring_explanations"] + [expl],
+        "current_item_index": state["current_item_index"] + 1,
+        "nav_instruction": "Start item.",
+        "followup_count": 0
+    }
+
+# ================= GRAPH LOGIC =================
+def should_continue(state: AgentState):
+    if state["next_action"] == "FOLLOW_UP": return "question"
+    return "scoring"
+
+def check_end(state: AgentState):
+    if state["current_item_index"] > 8: return END
+    return "question"
+
+def build_graph():
+    workflow = StateGraph(AgentState)
+    workflow.add_node("question", question_node)
+    workflow.add_node("participant", participant_node)
+    workflow.add_node("clarification", clarification_node)
+    workflow.add_node("alignment", alignment_node)
+    workflow.add_node("navigation", navigation_node)
+    workflow.add_node("scoring", scoring_node)
+
+    workflow.set_entry_point("question")
+    workflow.add_edge("question", "participant")
+    workflow.add_edge("participant", "clarification")
+    workflow.add_edge("participant", "alignment")
+    workflow.add_edge("clarification", "navigation")
+    workflow.add_edge("alignment", "navigation")
+    
+    workflow.add_conditional_edges("navigation", should_continue, {"question": "question", "scoring": "scoring"})
+    workflow.add_conditional_edges("scoring", check_end, {"question": "question", END: END})
+    
+    return workflow.compile()
+
+# ================= MAIN =================
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pid", type=str, required=True)
+    args = parser.parse_args()
+
+    # Load Profile
+    try:
+        with open(f"Clean_Dataset/profiles/{args.pid}_client_profile.json", "r", encoding="utf-8") as f:
+            profile_data = json.load(f)
+            profile_str = json.dumps(profile_data, ensure_ascii=False)
+    except Exception:
+        print("Profile error: File not found."); return
+    
+    # Initialize Evidence Structure
+    items_init = {f"Item {i+1}": {"label": h["label"], "item_id": h["item_id"], "supporting":[], "contradicting":[], "neutral":[]} for i, h in enumerate(PHQ8_HYPOTHESES)}
+
+    # ---------------------------------------------------------
+    # 👇 REPLACE YOUR OLD 'state' BLOCK WITH THIS NEW ONE 👇
+    # ---------------------------------------------------------
+    state = {
+        "participant_profile": profile_str,
+        "history": [],
+        "transcript": [],
+        
+        # --- INTRO CONFIGURATION ---
+        "current_item_index": 0,          # Start at 0
+        "current_item_id": "INTRO",       # ID is INTRO
+        "current_item_label": "Introduction", 
+        "current_hypothesis": "Establish rapport.", 
+        
+        # --- NEW COUNTER (Required for the 2-4 question loop) ---
+        "intro_turn_count": 0, 
+
+        # --- STANDARD FIELDS ---
+        "items_evidence": items_init,
+        "final_scores": [],
+        "scoring_explanations": [],
+        "agent_thoughts": [],
+        "clarification_missing_domains": [],
+        "nav_instruction": "Start introduction.",
+        "followup_count": 0 
+    }
+    # ---------------------------------------------------------
+
+    print(f"\n🚀 Multi-Agent System (PID {args.pid}) Started...")
+    app = build_graph()
+    
+    # INCREASE RECURSION LIMIT to 150
+    final_state = app.invoke(state, {"recursion_limit": 150})
+
+    # SAVE FILES
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("multi-agent-system", f"run_{args.pid}")
+    dirs = {k: os.path.join(run_dir, v) for k, v in [
+        ("ev", "Evidence"), ("tr", "Transcript"), ("th", "Agent_Thoughts"), ("sc", "Scores"), ("ex", "Scoring_Explanations")]}
+    for d in dirs.values(): os.makedirs(d, exist_ok=True)
+
+    with open(os.path.join(dirs["ev"], f"Evidence_{ts}.json"), "w") as f: json.dump(final_state["items_evidence"], f, indent=2)
+    with open(os.path.join(dirs["tr"], f"Transcript_{ts}.jsonl"), "w") as f: 
+        for t in final_state["transcript"]: f.write(json.dumps(t)+"\n")
+    with open(os.path.join(dirs["th"], f"Thoughts_{ts}.jsonl"), "w") as f: 
+        for t in final_state["agent_thoughts"]: f.write(json.dumps(t)+"\n")
+    with open(os.path.join(dirs["ex"], f"Explanations_{ts}.json"), "w") as f: json.dump(final_state["scoring_explanations"], f, indent=2)
+
+    # --- UPDATED CSV SAVING LOGIC (With Total Score) ---
+    
+    # 1. Calculate Total Score
+    total_score = sum(item["Score"] for item in final_state["final_scores"])
+    
+    # 2. Prepare Data (Items + Total Row)
+    # Note: We rely on scoring_node providing 'Item Label' now.
+    csv_data = final_state["final_scores"] + [
+        {
+            "Item ID": "TOTAL", 
+            "Item Label": "PHQ-8 SUM", 
+            "Score": total_score
+        }
+    ]
+    
+    # 3. Write to CSV (Clean Columns)
+    csv_path = os.path.join(dirs["sc"], f"Scores_{ts}.csv")
+    with open(csv_path, "w", newline="") as f:
+        # Defined exact columns: ID, Label, Score
+        fieldnames = ["Item ID", "Item Label", "Score"]
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(csv_data)
+
+    print(f"\n✅ Done. Total PHQ-8 Score: {total_score}. Saved to: {os.path.abspath(run_dir)}")
+
+if __name__ == "__main__":
+    main()
