@@ -1,4 +1,4 @@
-# Multi-Agent System for Clinical Assessment (PHQ-8)
+# Multi-Agent Guided Measure  for PHQ-8 Assessment (MAGMA)
 Bridging the gap between scalable automated screening and clinically valid diagnostics.
 
 ## 📖 Overview
