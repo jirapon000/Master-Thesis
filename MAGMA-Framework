@@ -597,28 +597,29 @@ def alignment_node(state: AgentState):
 
 # 5. Navigation Node
 def navigation_node(state: AgentState):
+    # 1. Get inputs from State
     missing_list = state.get("clarification_missing_domains", [])
     current_retries = state.get("followup_count", 0)
 
     # Initialize variable to prevent UnboundLocalError
     style_guide = "Standard Follow-up" 
 
-    # 1. Ask Navigation Agent for opinion
+    # 2. Ask Navigation Agent for opinion
     res = (navigation_template | llm | json_parser).invoke({
         "c_stat": state["clarification_status"], 
         "c_reas": state["clarification_reason"],
-        "a_stat": state["alignment_status"], 
-        "a_reas": state["alignment_reason"]
+        "a_stat": state.get("clarification_status", "UNKNOWN"),  
+        "a_reas": state.get("clarification_reason", "None")
     })
     
     proposed_action = res.get("next_action", "SCORE_AND_NEXT")
     base_instruction = res.get("instruction", "")
 
-    # 2. DECISION LOGIC
+    # 3. DECISION LOGIC
     
     # CASE A: Max Retries Hit -> Force Score
     if proposed_action == "FOLLOW_UP" and current_retries >= 3:
-        print(f"   [Logic] 🛑 MAX RETRIES ({current_retries}) HIT -> Forcing Score...")
+        print(f"   [Logic] 🛑 MAX RETRIES ({current_retries}) HIT -> Forcing Next Item...")
         final_action = "SCORE_AND_NEXT"
         final_instruction = "Move to scoring."
         missing_list = [] 
@@ -680,24 +681,22 @@ def navigation_node(state: AgentState):
              final_action = proposed_action
              final_instruction = base_instruction
 
-    # 3. Print Logic Status
+    # 3. 4. Print Logic Status
     if final_action == "FOLLOW_UP":
         print(f"   [Logic] ⚠️  MISSING: {missing_list} -> Strategy: {style_guide} (Attempt {current_retries + 1}/3)...")
         new_followup_count = current_retries + 1
     else:
-        # Check if we are in Intro, Closing, or real Scoring
         if state["current_item_id"] == "INTRO":
              print(f"   [Logic] 💬  Intro Dialogue -> Continuing...")
-        
         elif state["current_item_id"] == "CLOSING":
              print(f"   [Logic] 🏁  CLOSING -> Ending Experiment...")
-             
         else:
-             print(f"   [Logic] ✅  COMPLETE -> Scoring...")
+             # 👇 UPDATE THIS LINE 👇
+             print(f"   [Logic] ✅  COMPLETE -> Next Item...")
              
-        new_followup_count = current_retries
+        new_followup_count = 0
 
-    # 4. ENTAILMENT
+    # 5. ENTAILMENT
     items_data = state["items_evidence"] # Load existing data
     # Only run Entailment if we are NOT in the Intro
     if state["current_item_id"] != "INTRO":
@@ -727,7 +726,59 @@ def navigation_node(state: AgentState):
             
             items_data[item_key][role].append(entry)
 
-    # 5. Save & Return
+    # 6. ANALYTIC BLOCK (FIXED & ACCURATE)
+    # A. Get the Raw Difficulty from the Participant Node
+    raw_mode = state.get("current_difficulty", "level1").lower()
+    
+    # B. Map it to your Analytic Categories (The "Injected Flaw")
+    if raw_mode == "level1":
+        injected_flaw = "none"
+    elif raw_mode == "level2":
+        injected_flaw = "vagueness" # Level 2 Metaphors = Vagueness
+    elif raw_mode in ["vagueness", "timeframe", "relevance"]:
+        injected_flaw = raw_mode    # Exact match (e.g., from Level 3)
+    else:
+        # Fallback (e.g. if it says "level3" without a specific type)
+        injected_flaw = "vagueness" 
+
+    # C. Map Detected Flaw (What the bot actually found)
+    detected_flaw = "none"
+    if missing_list:
+        detected_flaw = missing_list[0] 
+
+    # D. Turn Label
+    turn_label = "Initial" if state["followup_count"] == 0 else f"FollowUp_{state['followup_count']}"
+
+    # E. Calculate Bot_Caught_Flaw (The Logic Check)
+    bot_caught = False
+    
+    # Case 1: No flaw injected -> Success is moving on
+    if injected_flaw == "none" and final_action == "SCORE_AND_NEXT":
+        bot_caught = True
+        
+    # Case 2: Flaw injected -> Success is following up
+    elif injected_flaw != "none" and final_action == "FOLLOW_UP":
+        bot_caught = True
+
+    # F. Create Record
+    analytic_entry = {
+        "PID": "PENDING", 
+        "Item": state["current_item_id"],
+        "Turn": turn_label,
+        "Injected_Flaw": injected_flaw, 
+        "Detected_Flaw": detected_flaw,
+        "Agent_Decision": final_action, 
+        "Bot_Caught_Flaw": bot_caught,
+        "Agent_Score": -1, 
+        "Participant_Text": state["last_answer"].replace('"', "'") 
+    }
+
+    # Only append if NOT Intro
+    current_analytics = state.get("analytics_records", [])
+    if state["current_item_id"] != "INTRO":
+        current_analytics.append(analytic_entry)
+
+    # 7. Save & Return
     thought = {
         "item": state["current_item_id"],
         "clarification": state["clarification_status"],
@@ -736,140 +787,78 @@ def navigation_node(state: AgentState):
         "instruction": final_instruction
     }
 
-    # 6. Analytic Block for Analytic Metric
-    #Map Injected Flaw
-    diff_map = {"level1": "none", "level2": "none", "level3": "vagueness"}
-    injected_flaw = diff_map.get(state.get("current_difficulty", "level1"), "none")
-
-    #Map Detected Flaw
-    detected_flaw = "none"
-    if missing_list:
-        detected_flaw = missing_list[0] 
-
-    #Determine "Turn" Label
-    turn_label = "Initial" if state["followup_count"] == 0 else f"FollowUp_{state['followup_count']}"
-
-    #Calculate Bot_Caught_Flaw
-    bot_caught = False
-    if injected_flaw == "vagueness" and final_action == "FOLLOW_UP":
-        bot_caught = True
-    elif injected_flaw == "none" and final_action == "SCORE_AND_NEXT":
-        bot_caught = True
-
-    #Create Record
-    analytic_entry = {
-        "PID": "PENDING", # Filled in Main
-        "Item": state["current_item_id"],
-        "Turn": turn_label,
-        "Injected_Flaw": injected_flaw,
-        "Detected_Flaw": detected_flaw,
-        "Agent_Decision": final_action, 
-        "Bot_Caught_Flaw": bot_caught,
-        "Agent_Score": -1, # Placeholder, updated in Scoring Node
-        "Participant_Text": state["last_answer"].replace('"', "'") 
-    }
-
-    #Only append if NOT Intro
-    current_analytics = state.get("analytics_records", [])
-    if state["current_item_id"] != "INTRO":
-        current_analytics.append(analytic_entry)
-
     return {
         "next_action": final_action, 
         "nav_instruction": final_instruction, 
         "agent_thoughts": state["agent_thoughts"] + [thought],
         "items_evidence": items_data,
-        "followup_count": new_followup_count
+        "followup_count": new_followup_count # <--- This sends the 0 or >0 to the graph
     }
 
-# 6. Scoring Node
-def scoring_node(state: AgentState):
-
-    # CASE A: INTRO PHASE (The Loop)
-    if state["current_item_id"] == "INTRO":
+# 6. Transition Node (FIXED: Properly loads next item)
+def transition_node(state: AgentState):
+    # Retrieve current state info
+    current_id = state["current_item_id"]
+    current_idx = state["current_item_index"]
+    
+    # -------------------------------------------------------
+    # CASE A: INTRO PHASE (Loop 3 times)
+    # -------------------------------------------------------
+    if current_id == "INTRO":
         current_count = state.get("intro_turn_count", 0) + 1
-        
-        # --- CONFIG: How many intro questions? (Set to 3 for a 3-turn warmup) ---
-        INTRO_LIMIT = 3 
+        INTRO_LIMIT = 3
         
         if current_count < INTRO_LIMIT:
-            # STAY IN INTRO
-            if current_count == 1:
-                next_instr = "The patient answered your greeting. Now ask a polite follow-up question about their daily life, work, or recent events to build rapport."
-            else:
-                next_instr = "Ask one final general question to get to know them better before starting the assessment."
-                
+            # Stay in Intro loop
+            next_instr = "Ask a polite follow-up question." if current_count == 1 else "Ask one final general question."
             return {
-                "final_scores": state["final_scores"],
-                "scoring_explanations": state["scoring_explanations"],
-                "current_item_index": 0, # <--- STAY AT 0
-                "intro_turn_count": current_count, # Increment count
+                "current_item_index": 0,
+                "intro_turn_count": current_count,
                 "nav_instruction": next_instr,
-                "followup_count": 0
+                "followup_count": 0,
+                "symptom_summaries": state.get("symptom_summaries", [])
             }
         else:
-            # MOVE TO ITEM 1 (Transition)
+            # FINISHED INTRO -> LOAD ITEM 1
+            next_item = PHQ8_HYPOTHESES[0] # Item 1 is at index 0
             return {
-                "final_scores": state["final_scores"],
-                "scoring_explanations": state["scoring_explanations"],
-                "current_item_index": 1, # <--- MOVE TO ITEM 1
+                "current_item_index": 1,
+                "current_item_id": next_item["item_id"],   # <--- Update ID to "Item 1"
+                "current_item_label": next_item["label"],  # <--- Update Label
+                "current_hypothesis": next_item["text"],   # <--- Update Hypothesis
                 "intro_turn_count": current_count,
-                # The instruction here guides the transition into the first symptom
-                "nav_instruction": "Smoothly transition from the small talk into the first topic: Anhedonia (lack of interest).",
-                "followup_count": 0
+                "nav_instruction": "Transition to Item 1: Anhedonia.",
+                "followup_count": 0,
+                "symptom_summaries": state.get("symptom_summaries", [])
             }
-            
-    # CASE B: NORMAL SCORING (Keep existing logic)
-    # Filter history for current item only
-    current_id = state["current_item_id"]
-    relevant_turns = [t for t in state["transcript"] if t.get("item_id") == current_id]
+
+    # -------------------------------------------------------
+    # CASE B: CLOSING PHASE (End the Interview)
+    # -------------------------------------------------------
+    if current_id == "CLOSING":
+        return {
+            "current_item_index": 10, # Move to Batch Scoring
+            "nav_instruction": "End experiment.",
+            "followup_count": 0,
+            "analytics_records": state.get("analytics_records", []),
+            "symptom_summaries": state.get("symptom_summaries", [])
+        }
+
+    # -------------------------------------------------------
+    # CASE C: NORMAL ITEMS (Move 1 -> 2 ... -> 8 -> Closing)
+    # -------------------------------------------------------
     
-    focused_history = ""
-    for t in relevant_turns:
-        focused_history += f"{t['speaker']}: {t['text']}\n"
-        
-    if not focused_history:
-        focused_history = state["last_question"] + "\n" + state["last_answer"]
-
-    res = (scoring_template | llm | json_parser).invoke({
-        "item_label": state["current_item_label"],
-        "hypothesis": state["current_hypothesis"],
-        "history_str": focused_history 
-    })
-    score = res.get("score", 0)
-
+    # 1. PROCESS SYMPTOM SUMMARY (Save flaws before moving on)
     updated_analytics = state.get("analytics_records", [])
-    if updated_analytics:
-        # Get the last entry (the one Navigation just added)
-        last_entry = updated_analytics[-1]
-        
-        # Double check it matches current item
-        if last_entry["Item"] == state["current_item_id"]:
-            last_entry["Agent_Score"] = score
-            # Update the list
-            updated_analytics[-1] = last_entry
     
-    final_s = {
-        "Item ID": state["current_item_id"], 
-        "Item Label": state["current_item_label"], 
-        "Score": score
-    }
-    
-    expl = {"item_id": state["current_item_id"], "score": score, "explanation": res.get("explanation", "")}
-
-    # =======================================================
-    # 👇 GENERATE DETAILED SYMPTOM SUMMARY HERE 👇
-    # =======================================================
-    
-    # 1. Filter analytics for the CURRENT item only
+    # Filter analytics for CURRENT item
     current_item_logs = [r for r in updated_analytics if r["Item"] == state["current_item_id"]]
     
-    # 2. Initialize text buckets
+    # Sort text into buckets
     vagueness_texts = []
     timeframe_texts = []
     relevance_texts = []
     
-    # 3. Sort the participant's answers into buckets based on the flaw detected
     for log in current_item_logs:
         flaw = log["Detected_Flaw"]
         text = log["Participant_Text"]
@@ -881,13 +870,12 @@ def scoring_node(state: AgentState):
         elif flaw == "relevance":
             relevance_texts.append(text)
             
-    # 4. Count Follow-ups
+    # Count Follow-ups
     followup_count = sum(1 for log in current_item_logs if log["Agent_Decision"] == "FOLLOW_UP")
     
-    # 5. Create Detailed Entry
-    # We join with " | " in case they made the same mistake twice in one item
+    # Create Summary Entry
     symptom_entry = {
-        "PID": "PENDING", # Filled in main
+        "PID": "PENDING", 
         "Item": state["current_item_id"],
         "Vagueness_Response": " | ".join(vagueness_texts) if vagueness_texts else "None",
         "Timeframe_Response": " | ".join(timeframe_texts) if timeframe_texts else "None",
@@ -895,19 +883,115 @@ def scoring_node(state: AgentState):
         "Total_Followups": followup_count
     }
     
-    # 6. Append to State
+    # Append to List
     current_summaries = state.get("symptom_summaries", [])
-    if state["current_item_id"] not in ["INTRO", "CLOSING"]:
-        current_summaries.append(symptom_entry)
+    current_summaries.append(symptom_entry)
+
+    # 2. CALCULATE NEXT ITEM (This is the critical fix)
+    next_idx = current_idx + 1
     
+    # If we finished Item 8 (index 8), go to CLOSING (Index 9)
+    if next_idx > 8:
+        return {
+            "current_item_index": 9,
+            "current_item_id": "CLOSING",          # <--- SET TO CLOSING
+            "current_item_label": "Closing",
+            "current_hypothesis": "End the conversation politely.",
+            "nav_instruction": "Wrap up the interview.",
+            "followup_count": 0,
+            "symptom_summaries": current_summaries
+        }
+        
+    else:
+        # Load Next Item
+        # Note: PHQ8_HYPOTHESES[0] is Item 1. 
+        # So if next_idx is 2 (Item 2), we need PHQ8_HYPOTHESES[1].
+        next_item = PHQ8_HYPOTHESES[next_idx - 1]
+        
+        return {
+            "current_item_index": next_idx,
+            "current_item_id": next_item["item_id"],   # <--- UPDATE ID (e.g., "Item 2")
+            "current_item_label": next_item["label"],  # <--- UPDATE LABEL
+            "current_hypothesis": next_item["text"],   # <--- UPDATE HYPOTHESIS
+            "nav_instruction": "Start next item.",
+            "followup_count": 0,
+            "symptom_summaries": current_summaries
+        }
+    
+# 7. Batch Scoring Node (Updates Scores AND Analytics)
+def batch_scoring_node(state: AgentState):
+    print("\n⏳ Interview Complete. Starting Batch Scoring...")
+    
+    final_scores = []
+    scoring_explanations = []
+    
+    # Get the existing analytics list so we can update it
+    updated_analytics = state.get("analytics_records", [])
+    
+    # Loop through PHQ-8 Items
+    for i, item_def in enumerate(PHQ8_HYPOTHESES):
+        item_id = item_def["item_id"]
+        item_label = item_def["label"]
+        hypothesis = item_def["text"]
+        
+        # 1. Gather Transcript
+        relevant_turns = [t for t in state["transcript"] if t.get("item_id") == item_id]
+        if not relevant_turns:
+            print(f"   ⚠️ No transcript found for {item_id}, skipping...")
+            continue
+            
+        history_text = ""
+        for t in relevant_turns:
+            history_text += f"{t['speaker']}: {t['text']}\n"
+            
+        # 2. Gather Evidence (Symptom Context)
+        symptoms = [s for s in state.get("symptom_summaries", []) if s["Item"] == item_id]
+        symptom_context = ""
+        if symptoms:
+            s = symptoms[0]
+            symptom_context = (
+                f"NOTE: During this item, the patient had these issues:\n"
+                f"- Vagueness: {s['Vagueness_Response']}\n"
+                f"- Timeframe issues: {s['Timeframe_Response']}\n"
+                f"- Relevance issues: {s['Relevance_Response']}\n"
+                f"- Total clarifications needed: {s['Total_Followups']}"
+            )
+
+        # 3. Invoke LLM
+        res = (scoring_template | llm | json_parser).invoke({
+            "item_label": item_label,
+            "hypothesis": hypothesis,
+            "history_str": history_text + "\n" + symptom_context
+        })
+        
+        score = res.get("score", 0)
+        explanation = res.get("explanation", "")
+        
+        print(f"   ✅ Scored {item_id}: {score} ({item_label})")
+        
+        # 4. BACK-FILL ANALYTICS (Crucial Step!)
+        # Go through the logs and update the 'Agent_Score' for this item
+        for record in updated_analytics:
+            if record["Item"] == item_id:
+                record["Agent_Score"] = score
+
+        # 5. Save Score Data
+        final_scores.append({
+            "Item ID": item_id, 
+            "Item Label": item_label, 
+            "Score": score
+        })
+        scoring_explanations.append({
+            "item_id": item_id, 
+            "score": score, 
+            "explanation": explanation
+        })
+
+    # Return EVERYTHING (Scores + Updated Analytics)
     return {
-        "final_scores": state["final_scores"] + [final_s],
-        "scoring_explanations": state["scoring_explanations"] + [expl],
-        "current_item_index": state["current_item_index"] + 1,
-        "nav_instruction": "Start item.",
-        "followup_count": 0,
-        "analytics_records": updated_analytics,
-        "symptom_summaries": current_summaries
+        "final_scores": final_scores,
+        "scoring_explanations": scoring_explanations,
+        "analytics_records": updated_analytics # <--- Saves the updated list
     }
 
 # ================= GRAPH LOGIC =================
@@ -921,23 +1005,61 @@ def check_end(state: AgentState):
 
 def build_graph():
     workflow = StateGraph(AgentState)
-    workflow.add_node("question", question_node)
-    workflow.add_node("participant", participant_node)
-    workflow.add_node("clarification", clarification_node)
-    workflow.add_node("alignment", alignment_node)
-    workflow.add_node("navigation", navigation_node)
-    workflow.add_node("scoring", scoring_node)
 
-    workflow.set_entry_point("question")
-    workflow.add_edge("question", "participant")
-    workflow.add_edge("participant", "clarification")
-    workflow.add_edge("participant", "alignment")
-    workflow.add_edge("clarification", "navigation")
-    workflow.add_edge("alignment", "navigation")
+    workflow.add_node("question_node", question_node)
+    workflow.add_node("participant_node", participant_node)
+    workflow.add_node("clarification_node", clarification_node)
+    workflow.add_node("navigation_node", navigation_node)
     
-    workflow.add_conditional_edges("navigation", should_continue, {"question": "question", "scoring": "scoring"})
-    workflow.add_conditional_edges("scoring", check_end, {"question": "question", END: END})
+    # RENAME: scoring_node is now transition_node
+    workflow.add_node("transition_node", transition_node) 
     
+    # NEW: Add the batch scorer
+    workflow.add_node("batch_scoring_node", batch_scoring_node)
+
+    workflow.set_entry_point("question_node")
+
+    workflow.add_edge("question_node", "participant_node")
+    workflow.add_edge("participant_node", "clarification_node")
+    workflow.add_edge("clarification_node", "navigation_node")
+
+    # Navigation logic (Split between Follow-up or Next Item)
+    def check_nav(state):
+        # If we need to follow up (retry), go back to Question Node
+        if state.get("followup_count", 0) > 0 and state["nav_instruction"] != "End experiment.":
+             return "question_node"
+        # Otherwise, move to Transition (Next Item)
+        return "transition_node"
+
+    workflow.add_conditional_edges(
+        "navigation_node",
+        check_nav,
+        {
+            "question_node": "question_node",
+            "transition_node": "transition_node" 
+        }
+    )
+
+    # Transition logic (Loop or End)
+    def check_end(state):
+        # If index > 9, conversation is over -> Go to Batch Scoring
+        if state["current_item_index"] > 9:
+            return "batch_scoring_node"
+        # Otherwise, ask next question
+        return "question_node"
+
+    workflow.add_conditional_edges(
+        "transition_node",
+        check_end,
+        {
+            "question_node": "question_node",
+            "batch_scoring_node": "batch_scoring_node"
+        }
+    )
+    
+    # Batch Scoring is the final step
+    workflow.add_edge("batch_scoring_node", END)
+
     return workflow.compile()
 
 # ================= MAIN =================
@@ -985,7 +1107,7 @@ def main():
         "agent_thoughts": [],
         "clarification_missing_domains": [],
         "nav_instruction": "Start introduction.",
-        "followup_count": 0 
+        "followup_count": 0
     }
     # ---------------------------------------------------------
 
