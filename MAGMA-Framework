@@ -1,3 +1,4 @@
+# python3 "Multiple-Agent(MAS).py" --pid (participant_id)
 
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -5,7 +6,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import json
 import argparse
 import datetime
-import random
 import random
 import csv
 import torch
@@ -115,7 +115,6 @@ class AlignmentHelper:
 alignment_helper = AlignmentHelper("phq8_alignment_map.json")
 
 # 2. Participant Simulator Response
-# 2. SIMULATED CLIENT ANSWER (Updated for INTRO support)
 def simulate_client_answer(
     item_id: str,
     item_index: int,
@@ -125,7 +124,7 @@ def simulate_client_answer(
     client_profile: Dict[str, Any],
     llm: ChatOpenAI,
     is_followup: bool = False,
-) -> str:
+) -> tuple[str, str]:
     """
     Generate a simulated client answer with DYNAMIC difficulty.
     It randomly selects a difficulty level based on defined weights.
@@ -135,53 +134,82 @@ def simulate_client_answer(
     # Weights: 20% Direct, 50% Paraphrase, 30% Ambiguous
     WEIGHTS = [0.2, 0.5, 0.3] 
     
-    selected_difficulty = random.choices(DIFFICULTY_MODES, weights=WEIGHTS, k=1)[0]
+    selected_tier = random.choices(DIFFICULTY_MODES, weights=WEIGHTS, k=1)[0]
 
-    if selected_difficulty == "level3":  # HARD / AMBIGUOUS
+    # --- 2. DEFINE INSTRUCTIONS & MODE LABEL ---
+    if selected_tier == "level3":
+        # LEVEL 3: FLAWS (Randomly pick WHICH flaw to inject)
+        flaw_types = ["vagueness", "timeframe", "relevance"]
+        specific_flaw = random.choice(flaw_types)
+        
+        mode_label = specific_flaw # This becomes the 'Injected_Flaw'
+
+        if item_id in ["INTRO", "CLOSING"]:
+            selected_tier = "level1"
+        
+        if specific_flaw == "vagueness":
+            diff_instruction = (
+                "**Goal: Be Vague.**\n"
+                "- Use non-committal words like 'sometimes', 'maybe', 'sort of'.\n"
+                "- Do NOT specify if it happens 1 day or 7 days a week.\n"
+                "- Make it impossible to decide between Score 1 and Score 2."
+            )
+        elif specific_flaw == "timeframe":
+            diff_instruction = (
+                "**Goal: Be Unclear about Time.**\n"
+                "- Talk about how you felt 'years ago' or 'in the past'.\n"
+                "- Do NOT confirm if this is happening *currently* (in the last 2 weeks).\n"
+                "- Use phrases like 'I used to feel...' or 'Back when I was working...'"
+            )
+        elif specific_flaw == "relevance":
+            diff_instruction = (
+                "**Goal: Go Off-Topic (Irrelevant).**\n"
+                "- Ignore the specific symptom asked.\n"
+                "- Talk about a tangential topic (e.g., your dog, the traffic, politics).\n"
+                "- Mention the keyword but in the wrong context."
+            )
+
+    elif selected_tier == "level2": 
+        # LEVEL 2: PARAPHRASE (Complex but Valid)
+        mode_label = "level2" # Injected_Flaw will be mapped to 'none' later
         diff_instruction = (
-            "**Internal Monologue: You are feeling unsure or guarded.**\n"
-            "- Be vague, indecisive, or non-committal.\n"
-            "- Use words like 'maybe', 'sort of', 'sometimes', 'I guess'.\n"
-            "- Do NOT give specific numbers or clear timeframes yet.\n"
-            "- Force the interviewer to dig deeper."
-        )
-    elif selected_difficulty == "level2": # MEDIUM / PARAPHRASE
-        diff_instruction = (
-            "**Internal Monologue: You are speaking naturally.**\n"
+            "**Goal: Natural & Metaphorical.**\n"
             "- Do NOT use clinical terms.\n"
-            "- Use metaphors, stories, or descriptions (e.g., 'I feel heavy' instead of 'depressed').\n"
-            "- The meaning is there, but the interviewer has to listen closely."
+            "- Use metaphors (e.g., 'I feel like a heavy blanket is on me').\n"
+            "- The answer MUST be valid and answer the question, just not directly."
         )
-    else: # LEVEL 1 (EASY / DIRECT)
+        
+    else: 
+        # LEVEL 1: DIRECT (Clear)
+        mode_label = "level1"
         diff_instruction = (
-            "**Internal Monologue: You want to be understood clearly.**\n"
+            "**Goal: Clear & Direct.**\n"
             "- Be helpful and explicit.\n"
-            "- Directly answer the question with a clear frequency or duration."
+            "- Directly answer the question with clear frequency/duration."
+
         )
 
-    # --- 2. EXTRACT PROFILE & STYLE (Restored) ---
+    # --- 3. EXTRACT PROFILE & STYLE (Restored) ---
     persona = client_profile.get("persona", {})
     interaction_style = persona.get("interaction_style", {})
     clinical_signals = (client_profile.get("clinical_signals", {}) or {}).get("symptoms", {})
-    behavioral_features = client_profile.get("behavioral_features", {})
+    behavioral_features = client_profile.get("behavioral_features", {}) 
 
-    style_label = interaction_style.get("style_label", "")
+    style_label = interaction_style.get("style_label", "Neutral")
     style_scores = interaction_style.get("scores", {})
     style_features = interaction_style.get("features", {})
     style_evidence = interaction_style.get("evidence_quotes", []) or []
 
-    # --- LOGIC FOR INTRO VS. CLINICAL ITEMS ---
+    # --- 4. CONSTRUCT PROMPT ---
     if item_id == "INTRO":
-        # Intro Case: No symptom lookup needed
         symptom_key = "general_wellbeing"
         symptom_block = {}
         special_instruction = (
-            "This is the Introduction. Ignore clinical symptoms. "
-            "Just answer the greeting naturally based on your persona, "
-            "interaction style, and current mood."
+            "This is the introduction. Ignore clinical symptoms. "
+            "Respond naturally. "
+            f"{diff_instruction}" 
         )
     else:
-        # Standard Case: Look up the specific symptom
         symptom_key = SYMPTOM_KEY_BY_ITEM_ID.get(item_id, "")
         symptom_block = clinical_signals.get(symptom_key, {}) if clinical_signals else {}
         
@@ -190,22 +218,19 @@ def simulate_client_answer(
         symptom_quotes = symptom_block.get("evidence_quotes", []) or []
         
         special_instruction = (
-            f"Ground the content in the clinical_signals for this symptom:\n"
+            f"Ground your response in these facts:\n"
             f"  - Symptom Status: {present}\n"
-            f"  - Severity Hint: {severity_hint}\n"
-            f"  - Evidence Quotes (Use as inspiration): {symptom_quotes}\n"
-            f"  - Focus on the LAST TWO WEEKS."
+            f"  - Severity: {severity_hint}\n"
+            f"  - {diff_instruction}" 
         )
 
-    # Construct the Profile Snippet (Safe for LLM context)
     profile_snippet = {
         "persona": {
             "demographics": persona.get("demographics", {}),
             "interaction_style": {
-                "style_label": style_label,
-                "scores": style_scores,
+                "label": style_label,
                 "features": style_features,
-                "evidence_quotes": style_evidence[:5],
+                "samples": style_evidence[:3],
             },
         },
         "clinical_signals": {
@@ -217,34 +242,28 @@ def simulate_client_answer(
     }
 
     role_tag = "follow-up" if is_followup else "initial"
-    
-    # --- FINAL PROMPT ---
+
     prompt = f"""
-You are role-playing a client in a PHQ-8 style clinical intake interview.
+        You ARE the participant described below.
+        **Profile:** {json.dumps(profile_snippet, ensure_ascii=False, indent=2)}
+        **Question:** "{question_text}"
 
-Here is the *client profile* (JSON-like, do NOT quote it back directly):
-{json.dumps(profile_snippet, ensure_ascii=False, indent=2)}
+        **Instructions:**
+        1. Speak as this person (First person "I").
+        2. {special_instruction}
+        3. Keep it to 1-2 sentences.
 
-The interviewer just asked this {role_tag} question:
-\"\"\"{question_text}\"\"\"
-
-Instructions for your reply:
-- Answer AS THIS CLIENT, in first person ("I").
-- Keep your tone consistent with interaction_style.style_label.
-- {special_instruction}
-- Use a natural, conversational style.
-- Length: 1–3 short sentences.
-- Do NOT mention that you are a profile, a dataset, or an AI.
-
-Now write ONLY the client's answer.
-"""
+        Reply exactly as the participant:
+        """
     try:
+        # Print mode for debugging
+        print(f"   [Simulation] Mode: {mode_label.upper()}") 
         resp = llm.invoke(prompt)
         text = (getattr(resp, "content", "") or "").strip()
-        return text if text else "..."
+        return (text if text else "...", mode_label)
     except Exception as e:
         print(f"Simulation Error: {e}")
-        return "I'm not sure."
+        return ("I'm not sure.", "level1")
 
 # ================= STATE DEFINITION =================
 class AgentState(TypedDict):
@@ -282,6 +301,11 @@ class AgentState(TypedDict):
 
     # NEW FIELD: Track how many times we've looped on the current item
     followup_count: int
+    intro_turn_count: int
+
+    # --- NEW FIELDS FOR ANALYTICS ---
+    analytics_records: List[Dict] # Stores the rows for the CSV
+    current_difficulty: str       # Tracks "level1", "level3" etc. for the current turn
 
 # ================= PROMPTS (5 AGENTS) =================
 
@@ -432,8 +456,19 @@ def question_node(state: AgentState):
         else:
             # This handles the 2nd and 3rd intro questions (e.g., "Ask about their job")
             instruction = current_instr
+        
+    # CASE B: CLOSING (Item 9) <--- NEW BLOCK
+    elif idx == 9:
+        state["current_item_id"] = "CLOSING"
+        state["current_item_label"] = "Closing"
+        state["current_hypothesis"] = "End the interview."
+        instruction = (
+            "The assessment is complete. "
+            "Thank the participant warmly for their openness and time. "
+            "Wish them a good rest of the day. Do NOT ask any new questions."
+        )
     
-    # CASE B: PHQ-8 ITEMS (Items 1-8)
+    # CASE C: PHQ-8 ITEMS (Items 1-8)
     else:
         list_idx = idx - 1
         if list_idx < len(PHQ8_HYPOTHESES):
@@ -475,13 +510,12 @@ def question_node(state: AgentState):
     }
 
 # 2. Participant Node
-# 2. Participant Node (UPDATED)
 def participant_node(state: AgentState):
     profile_obj = json.loads(state["participant_profile"])
     is_followup_flag = state.get("followup_count", 0) > 0
     
-    # No need to get difficulty from state anymore, the helper does it randomly.
-    answer = simulate_client_answer(
+    # UNPACK RESULT (Text, Difficulty)
+    answer_text, diff_mode = simulate_client_answer(
         item_id=state["current_item_id"],
         item_index=state["current_item_index"],
         item_label=state["current_item_label"],
@@ -492,27 +526,32 @@ def participant_node(state: AgentState):
         is_followup=is_followup_flag
     )
     
-    print(f"👤 Participant: {answer}")
+    print(f"👤 Participant: {answer_text}")
     
-    new_hist = state["history"] + [f"Participant: {answer}"]
+    new_hist = state["history"] + [f"Participant: {answer_text}"]
     
     turn = {
         "turn_index": len(state["transcript"])+1, 
         "speaker": PARTICIPANT_NAME, 
-        "text": answer, 
+        "text": answer_text, 
         "role": "answer",
         "item_id": state["current_item_id"]
     }
     
-    return {"last_answer": answer, "history": new_hist, "transcript": state["transcript"] + [turn]}
+    return {
+        "last_answer": answer_text, 
+        "history": new_hist, 
+        "transcript": state["transcript"] + [turn],
+        "current_difficulty": diff_mode
+    }
 
 # 3. Clarification Node
 def clarification_node(state: AgentState):
     #SKIP CHECK FOR INTRO
-    if state["current_item_id"] == "INTRO":
+    if state["current_item_id"] in ["INTRO", "CLOSING"]:
         return {
             "clarification_status": "COMPLETE",
-            "clarification_reason": "Introduction phase.",
+            "clarification_reason": "Non-clinical phase.",
             "clarification_missing_domains": []
         }
     
@@ -631,6 +670,9 @@ def navigation_node(state: AgentState):
              print("   [Logic] ⚠️  Agent wanted Follow-Up but nothing is missing -> Forcing Score.")
              final_action = "SCORE_AND_NEXT"
              final_instruction = "Proceed to scoring."
+        elif state["current_item_id"] == "CLOSING":
+             final_action = "SCORE_AND_NEXT"
+             final_instruction = "End interview."
         else:
              final_action = proposed_action
              final_instruction = base_instruction
@@ -640,34 +682,43 @@ def navigation_node(state: AgentState):
         print(f"   [Logic] ⚠️  MISSING: {missing_list} -> Strategy: {style_guide} (Attempt {current_retries + 1}/3)...")
         new_followup_count = current_retries + 1
     else:
-        print(f"   [Logic] ✅  COMPLETE -> Scoring...")
-        new_followup_count = current_retries 
+        # Check if we are in Intro or real Scoring
+        if state["current_item_id"] == "INTRO":
+             print(f"   [Logic] 💬  Intro Dialogue -> Continuing...")
+        else:
+             print(f"   [Logic] ✅  COMPLETE -> Scoring...")
+             
+        new_followup_count = current_retries
 
     # 4. ENTAILMENT
-    probs = compute_nli_probs(state["last_answer"], state["current_hypothesis"])
-    role = "neutral"
-    if probs["p_entail"] >= ENTAIL_THRESHOLD: role = "supporting"
-    elif probs["p_contradict"] >= CONTRADICT_THRESHOLD: role = "contradicting"
-    
-    items_data = state["items_evidence"]
-    item_key = f"Item {state['current_item_index'] + 1}"
-    
-    current_count = len(items_data[item_key][role]) + 1
-    evidence_id_key = f"evidence_{role}_id"
-    evidence_id_val = f"{state['current_item_id']}_{role}_E{current_count}"
-    
-    entry = {
-        evidence_id_key: evidence_id_val,   
-        "text": state["last_answer"],
-        "p_entail": round(probs["p_entail"], 4),
-        "p_contradict": round(probs["p_contradict"], 4),
-        "p_neutral": round(probs["p_neutral"], 4),
-        "followup_asked": (final_action == "FOLLOW_UP"),
-        "missing_domains": missing_list     
-    }
-    
-    if item_key in items_data:
-        items_data[item_key][role].append(entry)
+    items_data = state["items_evidence"] # Load existing data
+    # Only run Entailment if we are NOT in the Intro
+    if state["current_item_id"] != "INTRO":
+        probs = compute_nli_probs(state["last_answer"], state["current_hypothesis"])
+        role = "neutral"
+        if probs["p_entail"] >= ENTAIL_THRESHOLD: role = "supporting"
+        elif probs["p_contradict"] >= CONTRADICT_THRESHOLD: role = "contradicting"
+        
+        # --- FIX: USE INDEX DIRECTLY (Removed the +1) ---
+        item_key = f"Item {state['current_item_index']}"
+        
+        # Safety Check: Ensure key exists before accessing (Prevents 'Item 9' crash)
+        if item_key in items_data:
+            current_count = len(items_data[item_key][role]) + 1
+            evidence_id_key = f"evidence_{role}_id"
+            evidence_id_val = f"{state['current_item_id']}_{role}_E{current_count}"
+            
+            entry = {
+                evidence_id_key: evidence_id_val,   
+                "text": state["last_answer"],
+                "p_entail": round(probs["p_entail"], 4),
+                "p_contradict": round(probs["p_contradict"], 4),
+                "p_neutral": round(probs["p_neutral"], 4),
+                "followup_asked": (final_action == "FOLLOW_UP"),
+                "missing_domains": missing_list     
+            }
+            
+            items_data[item_key][role].append(entry)
 
     # 5. Save & Return
     thought = {
@@ -677,6 +728,44 @@ def navigation_node(state: AgentState):
         "decision": final_action,
         "instruction": final_instruction
     }
+
+    # 6. Analytic Block for Analytic Metric
+    #Map Injected Flaw
+    diff_map = {"level1": "none", "level2": "none", "level3": "vagueness"}
+    injected_flaw = diff_map.get(state.get("current_difficulty", "level1"), "none")
+
+    #Map Detected Flaw
+    detected_flaw = "none"
+    if missing_list:
+        detected_flaw = missing_list[0] 
+
+    #Determine "Turn" Label
+    turn_label = "Initial" if state["followup_count"] == 0 else f"FollowUp_{state['followup_count']}"
+
+    #Calculate Bot_Caught_Flaw
+    bot_caught = False
+    if injected_flaw == "vagueness" and final_action == "FOLLOW_UP":
+        bot_caught = True
+    elif injected_flaw == "none" and final_action == "SCORE_AND_NEXT":
+        bot_caught = True
+
+    #Create Record
+    analytic_entry = {
+        "PID": "PENDING", # Filled in Main
+        "Item": state["current_item_id"],
+        "Turn": turn_label,
+        "Injected_Flaw": injected_flaw,
+        "Detected_Flaw": detected_flaw,
+        "Agent_Decision": final_action, 
+        "Bot_Caught_Flaw": bot_caught,
+        "Agent_Score": -1, # Placeholder, updated in Scoring Node
+        "Participant_Text": state["last_answer"].replace('"', "'") 
+    }
+
+    #Only append if NOT Intro
+    current_analytics = state.get("analytics_records", [])
+    if state["current_item_id"] != "INTRO":
+        current_analytics.append(analytic_entry)
 
     return {
         "next_action": final_action, 
@@ -742,6 +831,17 @@ def scoring_node(state: AgentState):
         "history_str": focused_history 
     })
     score = res.get("score", 0)
+
+    updated_analytics = state.get("analytics_records", [])
+    if updated_analytics:
+        # Get the last entry (the one Navigation just added)
+        last_entry = updated_analytics[-1]
+        
+        # Double check it matches current item
+        if last_entry["Item"] == state["current_item_id"]:
+            last_entry["Agent_Score"] = score
+            # Update the list
+            updated_analytics[-1] = last_entry
     
     final_s = {
         "Item ID": state["current_item_id"], 
@@ -765,7 +865,7 @@ def should_continue(state: AgentState):
     return "scoring"
 
 def check_end(state: AgentState):
-    if state["current_item_index"] > 8: return END
+    if state["current_item_index"] > 9: return END
     return "question"
 
 def build_graph():
@@ -807,8 +907,6 @@ def main():
     items_init = {f"Item {i+1}": {"label": h["label"], "item_id": h["item_id"], "supporting":[], "contradicting":[], "neutral":[]} for i, h in enumerate(PHQ8_HYPOTHESES)}
 
     # ---------------------------------------------------------
-    # 👇 REPLACE YOUR OLD 'state' BLOCK WITH THIS NEW ONE 👇
-    # ---------------------------------------------------------
     state = {
         "participant_profile": profile_str,
         "history": [],
@@ -822,6 +920,10 @@ def main():
         
         # --- NEW COUNTER (Required for the 2-4 question loop) ---
         "intro_turn_count": 0, 
+
+        # --- NEW ANALYTICS FIELDS (CRITICAL FOR CSV) ---
+        "analytics_records": [],         
+        "current_difficulty": "level1",   
 
         # --- STANDARD FIELDS ---
         "items_evidence": items_init,
@@ -841,44 +943,75 @@ def main():
     final_state = app.invoke(state, {"recursion_limit": 150})
 
     # SAVE FILES
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join("multi-agent-system", f"run_{args.pid}")
-    dirs = {k: os.path.join(run_dir, v) for k, v in [
-        ("ev", "Evidence"), ("tr", "Transcript"), ("th", "Agent_Thoughts"), ("sc", "Scores"), ("ex", "Scoring_Explanations")]}
-    for d in dirs.values(): os.makedirs(d, exist_ok=True)
+    # =========================================================
+    # 1. Setup Directories
+    base_dir = "multi-agent-system"
+    
+    # 2. Define Sub-folders (Directly under base_dir)
+    dirs = {
+        "ev": os.path.join(base_dir, "Evidence"),
+        "tr": os.path.join(base_dir, "Transcript"),
+        "th": os.path.join(base_dir, "Agent_Thoughts"),
+        "sc": os.path.join(base_dir, "Scores"),
+        "ex": os.path.join(base_dir, "Scoring_Explanations"),
+        "an": os.path.join(base_dir, "Analysis_Metrics") 
+    }
+    
+    # 3. Create All Directories
+    for d in dirs.values(): 
+        os.makedirs(d, exist_ok=True)
 
-    with open(os.path.join(dirs["ev"], f"Evidence_{ts}.json"), "w") as f: json.dump(final_state["items_evidence"], f, indent=2)
-    with open(os.path.join(dirs["tr"], f"Transcript_{ts}.jsonl"), "w") as f: 
+    # --- SAVE OPERATIONS ---
+
+    # A. Save Evidence
+    with open(os.path.join(dirs["ev"], f"Evidence_{args.pid}.json"), "w") as f: 
+        json.dump(final_state["items_evidence"], f, indent=2)
+        
+    # B. Save Transcript
+    with open(os.path.join(dirs["tr"], f"Transcript_{args.pid}.jsonl"), "w") as f: 
         for t in final_state["transcript"]: f.write(json.dumps(t)+"\n")
-    with open(os.path.join(dirs["th"], f"Thoughts_{ts}.jsonl"), "w") as f: 
+    
+    # C. Save Agent Thoughts
+    with open(os.path.join(dirs["th"], f"Thoughts_{args.pid}.jsonl"), "w") as f: 
         for t in final_state["agent_thoughts"]: f.write(json.dumps(t)+"\n")
-    with open(os.path.join(dirs["ex"], f"Explanations_{ts}.json"), "w") as f: json.dump(final_state["scoring_explanations"], f, indent=2)
+    
+    # D. Save Explanations
+    with open(os.path.join(dirs["ex"], f"Explanations_{args.pid}.json"), "w") as f: 
+        json.dump(final_state["scoring_explanations"], f, indent=2)
 
-    # --- UPDATED CSV SAVING LOGIC (With Total Score) ---
-    
-    # 1. Calculate Total Score
+    # E. Save Scores CSV
     total_score = sum(item["Score"] for item in final_state["final_scores"])
-    
-    # 2. Prepare Data (Items + Total Row)
-    # Note: We rely on scoring_node providing 'Item Label' now.
     csv_data = final_state["final_scores"] + [
-        {
-            "Item ID": "TOTAL", 
-            "Item Label": "PHQ-8 SUM", 
-            "Score": total_score
-        }
+        {"Item ID": "TOTAL", "Item Label": "PHQ-8 SUM", "Score": total_score}
     ]
-    
-    # 3. Write to CSV (Clean Columns)
-    csv_path = os.path.join(dirs["sc"], f"Scores_{ts}.csv")
+    csv_path = os.path.join(dirs["sc"], f"Scores_{args.pid}.csv")
     with open(csv_path, "w", newline="") as f:
-        # Defined exact columns: ID, Label, Score
         fieldnames = ["Item ID", "Item Label", "Score"]
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(csv_data)
 
-    print(f"\n✅ Done. Total PHQ-8 Score: {total_score}. Saved to: {os.path.abspath(run_dir)}")
+    # F. Save Analytics CSV
+    analytics_path = os.path.join(dirs["an"], f"analysis_{args.pid}.csv")
+    
+    records = final_state.get("analytics_records", [])
+    
+    # Pre-process records
+    for r in records:
+        r["PID"] = args.pid 
+        if r["Agent_Decision"] == "SCORE_AND_NEXT":
+            r["Agent_Decision"] = "NEXT_ITEM"
+
+    if records:
+        keys = ["PID", "Item", "Turn", "Injected_Flaw", "Detected_Flaw", "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"]
+        with open(analytics_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=keys)
+            w.writeheader()
+            w.writerows(records)
+    # =========================================================
+
+    print(f"\n✅ Done. Total PHQ-8 Score: {total_score}.")
+    print(f"✅ All files saved to: {os.path.abspath(base_dir)}")
 
 if __name__ == "__main__":
     main()
