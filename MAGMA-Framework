@@ -1,4 +1,4 @@
-# python3 "Multiple-Agent(MAS).py" --pid (participant_id)
+# python3 "Multiple-Agent(MAGMA).py" --pid (participant_id)
 
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -306,6 +306,9 @@ class AgentState(TypedDict):
     # --- NEW FIELDS FOR ANALYTICS ---
     analytics_records: List[Dict] # Stores the rows for the CSV
     current_difficulty: str       # Tracks "level1", "level3" etc. for the current turn
+
+    # --- Symotoms Analysis ---
+    symptom_summaries: List[Dict]
 
 # ================= PROMPTS (5 AGENTS) =================
 
@@ -682,9 +685,13 @@ def navigation_node(state: AgentState):
         print(f"   [Logic] ⚠️  MISSING: {missing_list} -> Strategy: {style_guide} (Attempt {current_retries + 1}/3)...")
         new_followup_count = current_retries + 1
     else:
-        # Check if we are in Intro or real Scoring
+        # Check if we are in Intro, Closing, or real Scoring
         if state["current_item_id"] == "INTRO":
              print(f"   [Logic] 💬  Intro Dialogue -> Continuing...")
+        
+        elif state["current_item_id"] == "CLOSING":
+             print(f"   [Logic] 🏁  CLOSING -> Ending Experiment...")
+             
         else:
              print(f"   [Logic] ✅  COMPLETE -> Scoring...")
              
@@ -813,7 +820,6 @@ def scoring_node(state: AgentState):
             }
             
     # CASE B: NORMAL SCORING (Keep existing logic)
-    
     # Filter history for current item only
     current_id = state["current_item_id"]
     relevant_turns = [t for t in state["transcript"] if t.get("item_id") == current_id]
@@ -850,13 +856,58 @@ def scoring_node(state: AgentState):
     }
     
     expl = {"item_id": state["current_item_id"], "score": score, "explanation": res.get("explanation", "")}
+
+    # =======================================================
+    # 👇 GENERATE DETAILED SYMPTOM SUMMARY HERE 👇
+    # =======================================================
+    
+    # 1. Filter analytics for the CURRENT item only
+    current_item_logs = [r for r in updated_analytics if r["Item"] == state["current_item_id"]]
+    
+    # 2. Initialize text buckets
+    vagueness_texts = []
+    timeframe_texts = []
+    relevance_texts = []
+    
+    # 3. Sort the participant's answers into buckets based on the flaw detected
+    for log in current_item_logs:
+        flaw = log["Detected_Flaw"]
+        text = log["Participant_Text"]
+        
+        if flaw == "vagueness":
+            vagueness_texts.append(text)
+        elif flaw == "timeframe":
+            timeframe_texts.append(text)
+        elif flaw == "relevance":
+            relevance_texts.append(text)
+            
+    # 4. Count Follow-ups
+    followup_count = sum(1 for log in current_item_logs if log["Agent_Decision"] == "FOLLOW_UP")
+    
+    # 5. Create Detailed Entry
+    # We join with " | " in case they made the same mistake twice in one item
+    symptom_entry = {
+        "PID": "PENDING", # Filled in main
+        "Item": state["current_item_id"],
+        "Vagueness_Response": " | ".join(vagueness_texts) if vagueness_texts else "None",
+        "Timeframe_Response": " | ".join(timeframe_texts) if timeframe_texts else "None",
+        "Relevance_Response": " | ".join(relevance_texts) if relevance_texts else "None",
+        "Total_Followups": followup_count
+    }
+    
+    # 6. Append to State
+    current_summaries = state.get("symptom_summaries", [])
+    if state["current_item_id"] not in ["INTRO", "CLOSING"]:
+        current_summaries.append(symptom_entry)
     
     return {
         "final_scores": state["final_scores"] + [final_s],
         "scoring_explanations": state["scoring_explanations"] + [expl],
         "current_item_index": state["current_item_index"] + 1,
         "nav_instruction": "Start item.",
-        "followup_count": 0
+        "followup_count": 0,
+        "analytics_records": updated_analytics,
+        "symptom_summaries": current_summaries
     }
 
 # ================= GRAPH LOGIC =================
@@ -923,7 +974,9 @@ def main():
 
         # --- NEW ANALYTICS FIELDS (CRITICAL FOR CSV) ---
         "analytics_records": [],         
-        "current_difficulty": "level1",   
+        "current_difficulty": "level1", 
+        # --- SYMOTOMS ANALYSIS ---
+        "symptom_summaries": [],  
 
         # --- STANDARD FIELDS ---
         "items_evidence": items_init,
@@ -954,7 +1007,8 @@ def main():
         "th": os.path.join(base_dir, "Agent_Thoughts"),
         "sc": os.path.join(base_dir, "Scores"),
         "ex": os.path.join(base_dir, "Scoring_Explanations"),
-        "an": os.path.join(base_dir, "Analysis_Metrics") 
+        "an": os.path.join(base_dir, "Analysis_Metrics"),
+        "sy": os.path.join(base_dir, "Symptoms")
     }
     
     # 3. Create All Directories
@@ -1008,6 +1062,20 @@ def main():
             w = csv.DictWriter(f, fieldnames=keys)
             w.writeheader()
             w.writerows(records)
+
+    # G. SAVE SYMPTOMS SUMMARY CSV
+    symptoms_path = os.path.join(dirs["sy"], f"Symptoms_{args.pid}.csv")
+    sym_records = final_state.get("symptom_summaries", [])
+    
+    for r in sym_records:
+        r["PID"] = args.pid 
+        
+    if sym_records:
+        keys = ["PID", "Item", "Vagueness_Response", "Timeframe_Response", "Relevance_Response", "Total_Followups"]
+        with open(symptoms_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=keys)
+            w.writeheader()
+            w.writerows(sym_records)
     # =========================================================
 
     print(f"\n✅ Done. Total PHQ-8 Score: {total_score}.")
