@@ -408,26 +408,72 @@ Example: {{ "status": "CONSISTENT", "reason": "The patient previously said X..."
 
 # 4. Navigation Agent
 navigation_template = ChatPromptTemplate.from_messages([
-    ("system", """Decide next move.
-- If Missing/Conflict -> FOLLOW_UP.
-- Else -> SCORE_AND_NEXT.
+    ("system", """You are the Navigation Control for a clinical interview.
+
+**YOUR JOB:**
+Decide if we have enough information to move to the next question.
+
+**LOGIC RULES:**
+1. **FOLLOW_UP** if:
+   - The patient was vague, unclear, or avoided the question.
+   - The Clarification Report says "Missing Information" (Timeframe, Frequency).
+   - There is a contradiction in the story.
+
+2. **NEXT_ITEM** (Meaning: Item Complete) if:
+   - The patient has clearly answered the question.
+   - We have a clear sense of frequency/duration.
+   - No further clarification is needed.
 
 **OUTPUT FORMAT:**
 Return strict JSON using **DOUBLE QUOTES**.
-Example: {{ "next_action": "FOLLOW_UP", "instruction": "Clarify timeframe..." }}
+Example: {{ "next_action": "NEXT_ITEM", "instruction": "Proceed to next item." }}
 """),
-    ("human", "Reports: Clarification={c_stat} ({c_reas}), Alignment={a_stat} ({a_reas})")
+    ("human", """**STATUS REPORT:**
+- Clarification Status: {c_stat}
+- Clarification Reason: {c_reas}
+- Alignment Status: {a_stat}
+- Alignment Reason: {a_reas}
+
+**DECISION:**""")
 ])
 
 # 5. Scoring Agent
 scoring_template = ChatPromptTemplate.from_messages([
-    ("system", """Assign PHQ-8 score (0-3).
+    ("system", """You are an expert clinician administering the PHQ-8 assessment.
+
+**YOUR TASK:**
+Analyze the patient's history below to assign a score (0-3).
+
+**SCORING SCALE:**
+0 = Not at all
+1 = Several days
+2 = More than half the days
+3 = Nearly every day
+
+**CRITICAL INSTRUCTIONS:**
+1. **Review the Criteria:** Strictly apply the definition provided in the prompt.
+2. **Analyze Context:** The history includes the dialogue, behavioral notes (vagueness/resistance), and logic checks.
+   - If the patient was **vague** or **resistant**, treat their answers with caution.
+   - If they **contradicted** themselves, rely on the final clarified answer.
 
 **OUTPUT FORMAT:**
 Return strict JSON using **DOUBLE QUOTES**.
-Example: {{ "score": 2, "explanation": "Patient stated..." }}
+Example:
+{{
+    "score": 2,
+    "confidence": "High",
+    "explanation": "Patient initially used metaphors but eventually confirmed 'more than half the days'. Behavioral notes show vagueness was resolved."
+}}
 """),
-    ("human", "History:\n{history_str}")
+    ("human", """**ITEM TO ASSESS:** {item_label}
+
+**CRITERIA (HYPOTHESIS):**
+{hypothesis}
+
+**PATIENT HISTORY & BEHAVIORAL CONTEXT:**
+{history_str}
+
+**ASSIGN SCORE:**""")
 ])
 
 
@@ -612,15 +658,14 @@ def navigation_node(state: AgentState):
         "a_reas": state.get("clarification_reason", "None")
     })
     
-    proposed_action = res.get("next_action", "SCORE_AND_NEXT")
+    proposed_action = res.get("next_action", "NEXT_ITEM")
     base_instruction = res.get("instruction", "")
 
     # 3. DECISION LOGIC
-    
     # CASE A: Max Retries Hit -> Force Score
     if proposed_action == "FOLLOW_UP" and current_retries >= 3:
         print(f"   [Logic] 🛑 MAX RETRIES ({current_retries}) HIT -> Forcing Next Item...")
-        final_action = "SCORE_AND_NEXT"
+        final_action = "NEXT_ITEM"
         final_instruction = "Move to scoring."
         missing_list = [] 
     
@@ -669,13 +714,13 @@ def navigation_node(state: AgentState):
     
     # CASE C: Score or Empty Missing List
     else:
-        # SAFETY CHECK: If Agent wants FOLLOW_UP but list is empty, FORCE SCORE.
+        # SAFETY CHECK: If Agent wants FOLLOW_UP but list is empty, FORCE NEXT.
         if proposed_action == "FOLLOW_UP" and not missing_list:
-             print("   [Logic] ⚠️  Agent wanted Follow-Up but nothing is missing -> Forcing Score.")
-             final_action = "SCORE_AND_NEXT"
-             final_instruction = "Proceed to scoring."
+             print("   [Logic] ⚠️  Agent wanted Follow-Up but nothing is missing -> Forcing Next.")
+             final_action = "NEXT_ITEM"
+             final_instruction = "Proceed to next item."
         elif state["current_item_id"] == "CLOSING":
-             final_action = "SCORE_AND_NEXT"
+             final_action = "NEXT_ITEM"
              final_instruction = "End interview."
         else:
              final_action = proposed_action
@@ -705,10 +750,8 @@ def navigation_node(state: AgentState):
         if probs["p_entail"] >= ENTAIL_THRESHOLD: role = "supporting"
         elif probs["p_contradict"] >= CONTRADICT_THRESHOLD: role = "contradicting"
         
-        # --- FIX: USE INDEX DIRECTLY (Removed the +1) ---
         item_key = f"Item {state['current_item_index']}"
         
-        # Safety Check: Ensure key exists before accessing (Prevents 'Item 9' crash)
         if item_key in items_data:
             current_count = len(items_data[item_key][role]) + 1
             evidence_id_key = f"evidence_{role}_id"
@@ -723,7 +766,6 @@ def navigation_node(state: AgentState):
                 "followup_asked": (final_action == "FOLLOW_UP"),
                 "missing_domains": missing_list     
             }
-            
             items_data[item_key][role].append(entry)
 
     # 6. ANALYTIC BLOCK (FIXED & ACCURATE)
@@ -753,7 +795,7 @@ def navigation_node(state: AgentState):
     bot_caught = False
     
     # Case 1: No flaw injected -> Success is moving on
-    if injected_flaw == "none" and final_action == "SCORE_AND_NEXT":
+    if injected_flaw == "none" and final_action == "NEXT_ITEM":
         bot_caught = True
         
     # Case 2: Flaw injected -> Success is following up
@@ -924,6 +966,9 @@ def batch_scoring_node(state: AgentState):
     
     final_scores = []
     scoring_explanations = []
+
+    # Initialize Helper (Using your class)
+    helper = AlignmentHelper("phq8_alignment_map.json")
     
     # Get the existing analytics list so we can update it
     updated_analytics = state.get("analytics_records", [])
@@ -933,6 +978,8 @@ def batch_scoring_node(state: AgentState):
         item_id = item_def["item_id"]
         item_label = item_def["label"]
         hypothesis = item_def["text"]
+
+        alignment_context = helper.get_focused_history(item_id, state.get("items_evidence", {}))
         
         # 1. Gather Transcript
         relevant_turns = [t for t in state["transcript"] if t.get("item_id") == item_id]
@@ -1175,7 +1222,7 @@ def main():
     # Pre-process records
     for r in records:
         r["PID"] = args.pid 
-        if r["Agent_Decision"] == "SCORE_AND_NEXT":
+        if r["Agent_Decision"] == "NEXT_ITEM":
             r["Agent_Decision"] = "NEXT_ITEM"
 
     if records:
