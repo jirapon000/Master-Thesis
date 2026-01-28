@@ -42,10 +42,22 @@ To test the system's robustness against real-world linguistic variability, the s
 * Level 2 (Paraphrase): Restructures sentences to test semantic understanding.
 * Level 3 (Ambiguous): Introduces vague/circuitous language (e.g., "I guess I feel a bit off...") to test the system's ability to trigger necessary probes.
 
-## 📊 Evaluation Metrics
-The system is benchmarked against Single-Agent (Vanilla) and Chain-of-Thought (CoT) baselines using the following metrics:
+## 📊 Evaluation Metrics & Performance Analysis
+This system is evaluted on three dimension critical for clincal AI: **Robustness**, **Scoring Accuracy**, **Clinical Coherence**.
 
-Diagnostic Accuracy
-* MAE (Mean Absolute Error): Deviation from ground truth PHQ-8 scores.
-* Exact Match Accuracy: Percentage of perfectly predicted scores.
-* Case-F1 & Kappa: Reliability in binary depression diagnosis (Depressed vs. Non-Depressed).
+### 1. Missing Domain Rate (Robutness) 
+This metric evalutes on **Critic Agent's** ability to filter out invalid and ambiguous patient reponses. We conducr adversarial testing by injecting three type of flawed input into the dialogue that show the real human response:
+* **Relevance:** Inputs that are off-topic or nonsensical 
+* **Vagueness:** Inputs that lack sufficient detail to form a clincial judgment.
+* **TimeFrame:** Inputs describing symptoms outside the PHQ-8 diagnostic window (past 2 weeks).
+*  *Interpretation:* The **Missing Rate** represents the percentage of these flaws the system failed to catch.
+
+### 2. Diagnostic Accuracy (Bot vs. Human Labels)
+This measure the precision of the **Scoring Agents** on the PHQ-8 scale (0-3 per item).
+* **Mean Absolute Error (MAE):** The primary success metric. An MAE of **0.75** implies that, on average, the system's prediction deviates from the human clinician's score by less than 1 point.
+    * *Target:* MAE < 0.1 is considered acceptable for screening support.
+* **Item-Level Analysis (I1 - I8):** We track error rates per specific question. This help identify specific clinical concepts where the LLM struggle.
+
+### 3. Alignment Score (Clinical Coherene)
+* **Global Alignment Score:** A derived metric (0-100%) that quantifies the semantic similarity between the system's generated reasoning and standard clinical rationale.
+* It ensure the system isn't just guessing the right score (0-3) by chance, but is arriving at it for the correct *clinical reasons*.
