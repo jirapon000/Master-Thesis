@@ -2,7 +2,7 @@
 Bridging the gap between scalable automated screening and clinically valid diagnostics.
 
 ## 📖 Overview
-This repository contains the implementation of a Multi-Agent System (MAS) designed to automate the administration of the Patient Health Questionnaire-8 (PHQ-8). Unlike standard single-agent Large Language Models (LLMs) that treat assessment as a linear slot-filling task—often leading to "diagnostic drift" and hallucinations—this framework operates as a coordinated feedback loop.
+This repository contains the implementation of a multi-agent system called MAGMA (Multi-Agent Guided Measure  for PHQ-8 Assessment) designed to automate the administration of the Patient Health Questionnaire-8 (PHQ-8). Unlike standard single-agent Large Language Models (LLMs) that treat assessment as a linear slot-filling task—often leading to "diagnostic drift" and hallucinations—this framework operates as a coordinated feedback loop.
 
 Designed to mimic the cognitive process of a human clinician, the system employs a "Verify-then-Score" mechanism. It decomposes the clinical interview into specialized roles (Navigation, Questioning, Clarification, Alignment, and Scoring) to ensure that every diagnostic decision is grounded in explicit, non-contradictory evidence.
 
