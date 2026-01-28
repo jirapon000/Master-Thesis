@@ -43,9 +43,11 @@ To test the system's robustness against real-world linguistic variability, the s
 * Level 3 (Ambiguous): Introduces vague/circuitous language (e.g., "I guess I feel a bit off...") to test the system's ability to trigger necessary probes.
 
 ## 🔬 How to run the model
-To run the system, follow this sentence python3 #filesave_name.py -- pid (participant_id)
+To run the system, use the following command:
 
-change the participant id for which participant you want to run.
+python3 <filename>.py --pid <participant_id>
+
+Replace <participant_id> with the ID of the participant you want to run.
 
 ## 📊 Evaluation Metrics & Performance Analysis
 This system is evaluted on three dimension critical for clincal AI: **Robustness**, **Scoring Accuracy**, **Clinical Coherence**.
