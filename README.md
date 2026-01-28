@@ -1,5 +1,5 @@
 # Multi-Agent Guided Measure  for PHQ-8 Assessment (MAGMA)
-Bridging the gap between scalable automated screening and clinically valid diagnostics.
+MAGMA is a multi-agent framework for automated PHQ-8 administration that replaces linear LLM assessment with structured, evidence-verified clinical reasoning. Through a verify-then-score mechanism and active consistency checks, the system prevents diagnostic drift and logic hallucinations. The result is a scalable screening tool grounded in explicit, non-contradictory clinical evidence.
 
 ## 📖 Overview
 This repository contains the implementation of a multi-agent system called MAGMA (Multi-Agent Guided Measure  for PHQ-8 Assessment) designed to automate the administration of the Patient Health Questionnaire-8 (PHQ-8). Unlike standard single-agent Large Language Models (LLMs) that treat assessment as a linear slot-filling task—often leading to "diagnostic drift" and hallucinations—this framework operates as a coordinated feedback loop.
