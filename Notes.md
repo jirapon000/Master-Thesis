@@ -13,10 +13,10 @@ A single agent enhanced with "Chain-of-Thought" prompting, explicitly instructed
 A distributed system of specialized agents (Questioner, Navigator, Judge/Scorer) that divide the clinical workflow into discrete tasks. Objective: To address the "Missing Domain" and "Alignment" gaps that single-agent models cannot solve. Key Characteristics:
 
 * Role Specialization:
-  * Question Agent: Facilitates the natural language dialogue by maintaining the conversation history and translating technical instructions from the Navigation Agent into empathetic PHQ-8 items and follow-up probes.
-  * Navigation Agent: Acts as the central logic gatekeeper that evaluates signals from the detection agents to determine the workflow route, deciding whether to loop back for clarification or proceed to the Scoring Agent.
-  * Clarification Agent: Actively monitors the patient's response for completeness by scanning for missing key domains (Timeframe, Severity, Relevance) and triggering specific flags if the data is insufficient for a valid assessment.
-  * Alignment Agent: Ensures clinical coherence by using an Item-Dependency Map to cross-reference the current symptom against previous answers (e.g., checking Sleep scores against Fatigue), flagging any logical contradictions.
-  * Scoring Agent: Aggregates the verified evidence from the full interaction history (initial answer + clarifications) to map the patient's final clinical state to the quantitative PHQ-8 severity scale (0–3).
+  * **Question Agent**: Facilitates the natural language dialogue by maintaining the conversation history and translating technical instructions from the Navigation Agent into empathetic PHQ-8 items and follow-up probes.
+  * **Navigation Agent**: Acts as the central logic gatekeeper that evaluates signals from the detection agents to determine the workflow route, deciding whether to loop back for clarification or proceed to the Scoring Agent.
+  * **Clarification Agent**: Actively monitors the patient's response for completeness by scanning for missing key domains (Timeframe, Severity, Relevance) and triggering specific flags if the data is insufficient for a valid assessment.
+  * **Alignment Agent**: Ensures clinical coherence by using an Item-Dependency Map to cross-reference the current symptom against previous answers (e.g., checking Sleep scores against Fatigue), flagging any logical contradictions.
+  * **Scoring Agent**: Aggregates the verified evidence from the full interaction history (initial answer + clarifications) to map the patient's final clinical state to the quantitative PHQ-8 severity scale (0–3).
 
 * Clinical Alignment: Designed to enforce consistency across related symptoms (e.g., ensuring Sleep scores align with Fatigue scores), targeting a higher Global Alignment Score than the baselines.
