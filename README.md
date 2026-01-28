@@ -42,6 +42,11 @@ To test the system's robustness against real-world linguistic variability, the s
 * Level 2 (Paraphrase): Restructures sentences to test semantic understanding.
 * Level 3 (Ambiguous): Introduces vague/circuitous language (e.g., "I guess I feel a bit off...") to test the system's ability to trigger necessary probes.
 
+## 🔬 How to run the model
+To run the system, follow this sentence python3 #filesave_name.py -- pid (participant_id)
+
+change the participant id for which participant you want to run.
+
 ## 📊 Evaluation Metrics & Performance Analysis
 This system is evaluted on three dimension critical for clincal AI: **Robustness**, **Scoring Accuracy**, **Clinical Coherence**.
 
