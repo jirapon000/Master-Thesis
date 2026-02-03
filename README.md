@@ -45,7 +45,7 @@ To test the system's robustness against real-world linguistic variability, the s
 ## 🔬 How to run the model
 To run the system, use the following command:
 
-python3 <filename>.py --pid <participant_id>
+python3 (filename).py --pid <participant_id>
 
 Replace <participant_id> with the ID of the participant you want to run.
 
