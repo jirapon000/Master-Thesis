@@ -131,8 +131,8 @@ def simulate_client_answer(
     """
     # --- 1. DYNAMIC DIFFICULTY SELECTION ---
     DIFFICULTY_MODES = ["level1", "level2", "level3"]
-    # Weights: 20% Direct, 50% Paraphrase, 30% Ambiguous
-    WEIGHTS = [0.2, 0.5, 0.3] 
+    # Weights: 10% Direct, 50% Paraphrase, 40% Ambiguous
+    WEIGHTS = [0.1, 0.3, 0.6] 
     
     selected_tier = random.choices(DIFFICULTY_MODES, weights=WEIGHTS, k=1)[0]
 
@@ -171,7 +171,7 @@ def simulate_client_answer(
 
     elif selected_tier == "level2": 
         # LEVEL 2: PARAPHRASE (Complex but Valid)
-        mode_label = "level2" # Injected_Flaw will be mapped to 'none' later
+        mode_label = "VAGUENESS" # Injected_Flaw will be mapped to 'none' later
         diff_instruction = (
             "**Goal: Natural & Metaphorical.**\n"
             "- Do NOT use clinical terms.\n"
@@ -181,7 +181,7 @@ def simulate_client_answer(
         
     else: 
         # LEVEL 1: DIRECT (Clear)
-        mode_label = "level1"
+        mode_label = "NONE"
         diff_instruction = (
             "**Goal: Clear & Direct.**\n"
             "- Be helpful and explicit.\n"
@@ -241,26 +241,23 @@ def simulate_client_answer(
         "behavioral_features": behavioral_features,
     }
 
-    role_tag = "follow-up" if is_followup else "initial"
-
-    prompt = f"""
-        You ARE the participant described below.
-        **Profile:** {json.dumps(profile_snippet, ensure_ascii=False, indent=2)}
-        **Question:** "{question_text}"
-
-        **Instructions:**
-        1. Speak as this person (First person "I").
-        2. {special_instruction}
-        3. Keep it to 1-2 sentences.
-
-        Reply exactly as the participant:
-        """
+    # --- 5. EXECUTE SIMULATION (UPDATED TEMPLATE CALL) ---
     try:
         # Print mode for debugging
         print(f"   [Simulation] Mode: {mode_label.upper()}") 
-        resp = llm.invoke(prompt)
-        text = (getattr(resp, "content", "") or "").strip()
+        
+        # Call the Template defined at the top
+        chain = participant_template | llm | str_parser
+        
+        resp = chain.invoke({
+            "profile_json": json.dumps(profile_snippet, ensure_ascii=False, indent=2),
+            "question": question_text,
+            "special_instruction": special_instruction
+        })
+        
+        text = resp.strip()
         return (text if text else "...", mode_label)
+        
     except Exception as e:
         print(f"Simulation Error: {e}")
         return ("I'm not sure.", "level1")
@@ -310,8 +307,26 @@ class AgentState(TypedDict):
     # --- Symotoms Analysis ---
     symptom_summaries: List[Dict]
 
-# ================= PROMPTS (5 AGENTS) =================
+# ================= PROMPTS (Partiicpants) =================
+# 0. Participant Simulator (Persona)
+participant_template = ChatPromptTemplate.from_messages([
+    ("system", """You ARE the participant described below.
+    
+**PARTICIPANT PROFILE:**
+{profile_json}
 
+**CURRENT SCENARIO:**
+- **Interviewer Question:** "{question}"
+- **Instruction:** {special_instruction}
+
+**INSTRUCTIONS:**
+1. Speak strictly as this person (First person "I").
+2. {special_instruction}
+3. Keep the response to 1-2 sentences.
+"""),
+    ("human", "Reply exactly as the participant:")
+])
+# ================= PROMPTS (5 AGENTS) =================
 # 1. Question Agent
 question_template = ChatPromptTemplate.from_messages([
     ("system", """You are an expert **Clinical Psychologist** conducting a structured diagnostic interview.
