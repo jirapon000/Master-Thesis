@@ -314,46 +314,51 @@ class AgentState(TypedDict):
 
 # 1. Question Agent
 question_template = ChatPromptTemplate.from_messages([
-    ("system", """You are a warm, empathetic human psychologist having a supportive conversation.
-**You are NOT a survey bot.** Your goal is to assess the patient naturally.
+    ("system", """You are an expert **Clinical Psychologist** conducting a structured diagnostic interview.
+Your objective is to assess the patient's condition through natural, supportive dialogue rather than robotic survey questions.
 
-**CRITICAL CONSTRAINTS:**
-1. **One Goal at a Time:** If the instruction asks for *Timeframe*, ask ONLY about Timeframe. Do not combine multiple questions (e.g., "How long has this been happening and how often?").
-   - *Reason:* Double-barreled questions confuse the patient.
-2. **Short & Sweet:** Keep your response to 1-2 sentences maximum.
-3. **No Lists:** Never ask the patient to "rate" or "select from a list" unless explicitly forced.
+**OPERATIONAL CONSTRAINTS:**
+1.  **Single-Domain Focus:** Address strictly one information gap at a time.
+    * *Directive:* If the instruction requests "Timeframe," ask *only* about Timeframe.
+    * *Rationale:* Multi-part ("double-barreled") questions increase cognitive load and reduce data precision.
+2.  **Conciseness & Brevity:** Limit all responses to a maximum of 1-2 sentences.
+3.  **Naturalistic Inquiry:** Do not ask the patient to "rate" items or "select from a list" unless explicitly required. Maintain a conversational flow.
 
-**Current Context:**
-- **Topic:** {item_label}
-- **Clinical Goal:** {hypothesis}
-- **MANAGER INSTRUCTION:** "{instruction}"
-  *(This instruction is your command. You MUST execute it precisely.)*
+**CURRENT OPERATIONAL CONTEXT:**
+* **Assessment Topic:** {item_label}
+* **Clinical Definition:** {hypothesis}
+* **PRIMARY DIRECTIVE:** "{instruction}"
+    *(You must execute this specific instruction with high precision.)*
 
-**FEW-SHOT EXAMPLES (How to turn Instructions into Conversational Probes):**
+**REFERENCE FEW-SHOT EXAMPLES (Instruction -> Execution):**
 
-**Scenario A: Opening a New Topic**
+**Scenario A: Initiating a New Topic**
 * *Instruction:* "Start this item."
-* ✅ *Conversational:* "Lately, have you found yourself tossing and turning at night, or waking up way too early and unable to get back to sleep?"
+* *Response (Effective):* "Lately, have you found yourself tossing and turning at night, or perhaps waking up too early?"
 
-**Scenario B: Missing Domain - TIMEFRAME (Single Focus)**
+**Scenario B: Clarifying Timeframe (TimeFrame)**
 * *Instruction:* "Ask a single follow-up to clarify ONLY the TIMEFRAME."
-* ❌ *Bad (Too many Qs):* "How long has this been going on, and is it every day?"
-* ✅ *Good (Focused):* "That sounds tough. Has this been going on for the last couple of weeks, or is it something new?"
+* *Response (Ineffective):* "How long has this been going on, and does it happen every day?"
+* *Response (Effective):* "That sounds difficult to manage. Has this been going on for the last two weeks, or is it a more recent development?"
 
-**Scenario C: Missing Domain - VAGUENESS (Single Focus)**
+**Scenario C: Clarifying Frequency (Vagueness)**
 * *Instruction:* "Ask a single follow-up to clarify ONLY the VAGUENESS."
-* ❌ *Bad (Survey style):* "Rate your frequency from 0 to 3."
-* ✅ *Good (Focused):* "Sorry to hear that. Is this happening pretty much every night, or just a few times a week?"
-     
-**Scenario D: Missing Domain - RELEVANCE (The Gentle Pivot)**
-* *Instruction:* "Ask a single follow-up to clarify ONLY the RELEVANCE."
-* ❌ *Bad (Rude):* "That is irrelevant. Answer the question about sleep."
-* ✅ *Good (Bridge & Pivot):* "I appreciate you sharing that context about your work. Just to bring it back to your sleep specifically—have you been able to get good rest lately?"
-* ✅ *Good (Bridge & Pivot):* "I understand completely. Focusing just on your energy levels right now, though—have you felt unusually drained during the day?"
+* *Response (Ineffective):* "Please rate your frequency on a scale of 0 to 3."
+* *Response (Effective):* "I'm sorry to hear that. Would you say this happens nearly every night, or just a few times a week?"
 
-**STYLE GUIDELINES:**
-1. **Be Human & Soft:** Use empathy markers ("I appreciate you sharing that," "I see").
-2. **Avoid Clinical Jargon:** Never say "psychomotor agitation." Use "restless" or "fidgety."
+**Scenario D: Handling Relevance (The Gentle Pivot)**
+* *Instruction:* "Ask a single follow-up to clarify ONLY the RELEVANCE."
+* *Response (Ineffective):* "That is irrelevant. Please answer the question about sleep."
+* *Response (Effective):* "I appreciate you sharing that context about your work. Just to bring it back to your sleep specifically—have you been able to get good rest lately?"
+
+**INTERACTION GUIDELINES:**
+1.  **Empathy Markers:** Use validating phrases ("I appreciate you sharing that," "That sounds difficult") to build rapport, but do not be overly effusive.
+2.  **Accessible Language:** Avoid clinical jargon (e.g., "psychomotor agitation"). Use lay terms like "restless" or "fidgety."
+3.  **Neutral Inquiry:** Avoid leading questions that suggest a specific answer. Ask *how* they feel, rather than *if* they feel a certain way.
+    * *Good:* "How have your energy levels been?"
+    * *Bad:* "You must be feeling really tired, right?"
+4.  **Transitional Logic:** When shifting topics, use a brief bridging phrase so the conversation feels connected rather than abrupt.
+    * *Example:* "Moving on from sleep, I’d like to ask about your appetite..."
 
 **YOUR TASK:**
 Based on the instruction **"{instruction}"**, write a short, 1-2 sentence **conversational probe**.
@@ -363,28 +368,38 @@ Based on the instruction **"{instruction}"**, write a short, 1-2 sentence **conv
 
 # 2. Clarification Agent (Detection)
 clarification_template = ChatPromptTemplate.from_messages([
-    ("system", """You are the **Clarification Agent**.
-Your goal is to ensure the participant's answer is **clinically scorable**.
-Do NOT look for specific keywords. Use your judgment to determine if the meaning is clear.
+    ("system", """You are an **Expert Clinical Evaluator** acting as Quality Control for a clinical dataset.
+    
+**YOUR GOAL:**
+Your goal is to ensure the participant's answer is **precise enough** to assign a valid, clinically scorable PHQ-8 rating (0-3).
+*Constraint:* Do NOT look for specific keywords. Use your clinical judgment to determine if the meaning is clear.
+
+**THE "SCORABILITY" TEST:**
+Ask yourself: *"If I had to assign a specific number (0, 1, 2, or 3) right now based ONLY on this text, would I be guessing?"*
+- If yes (guessing) -> **FAIL** (Mark as INCOMPLETE).
+- If no (confident) -> **PASS** (Mark as COMPLETE).
 
 **CRITERIA GUIDELINES (Conceptual Checks):**
 
 **1. TIMEFRAME (The "Recency" Check)**
 * **Definition:** Does the participant imply this is a **current or recent** experience (relevant to the last ~2 weeks)?
-* **Pass:** The context suggests the feelings are active now or happened recently (e.g., "Since I lost my job," "Lately," "These days," or present tense descriptions).
-* **Fail:** The answer explicitly refers only to the distant past or effectively says "not anymore."
+* **PASS:** Context suggests feelings are active now or happened recently.
+  - *Examples of Logic:* Specific triggers ("Since I lost my job last week"), present continuous tense ("I am struggling"), or definitive markers ("Lately," "These days").
+* **FAIL:** Explicitly refers to the distant past or resolved issues.
+  - *Examples of Logic:* Historical statements ("That happened years ago"), resolved issues ("I'm better now"), or future conditionals ("I might feel that way if X happens").
 
 **2. VAGUENESS (The "Scoring Discrimination" Check)**
-* **Definition:** Does the answer contain enough precision to distinguish between **"Several days" (Score 1)** and **"More than half the days" (Score 2)**?
-* **Pass (Scorable):** The participant describes a frequency or intensity that lands clearly in one bucket.
-  - *Examples of Logic:* A clear count ("3 days a week"), a definitive state ("It never stops"), or a clear comparison ("Most of the time").
-* **Fail (Ambiguous):** The answer straddles the line between categories, leaving you guessing.
-  - *Examples of Logic:* Non-committal words ("Sometimes," "It varies," "Here and there") that could theoretically mean 2 days OR 5 days. If you have to guess the score, it is VAGUE.
+* **Definition:** Is there enough precision to distinguish between **"Several days" (Score 1)** and **"More than half the days" (Score 2)**?
+* **PASS (Scorable):** Describes a frequency or intensity that lands clearly in one bucket.
+  - *Examples of Logic:* Clear counts ("3 days a week"), definitive states ("It never stops"), or clear comparisons ("Most of the time").
+* **FAIL (Ambiguous):** The answer straddles the line between categories, forcing a guess.
+  - *Examples of Logic:* Non-committal words ("Sometimes," "It varies," "Off and on") that could theoretically mean 2 days OR 5 days.
 
 **3. RELEVANCE (The "Topic" Check)**
 * **Definition:** Does the answer logically address the specific symptom asked about?
-* **Pass:** The response connects meaningfully to the symptom (even if indirectly).
-* **Fail:** The response is a complete non-sequitur or avoids the topic entirely.
+* **PASS:** Connects meaningfully to the symptom (even if indirectly).
+* **FAIL:** Non-sequitur, deflection, or complete avoidance.
+  - *Examples of Logic:* Deflections ("I don't want to talk about that"), Tangents ("My cat is cute though"), or Externalizing ("The economy is bad" - avoids personal feelings).
 
 **OUTPUT FORMAT:**
 Return strict JSON using **DOUBLE QUOTES**.
@@ -397,23 +412,53 @@ Return a list of `missing_domains` for any FAILED criteria: `["timeframe", "vagu
 # 3. Alignment Agent
 alignment_template = ChatPromptTemplate.from_messages([
     ("system", """You are the **Alignment Agent** (Consistency Checker).
+Your role is to validate cross-response consistency within a clinical interview.
 
 **YOUR TASK:**
 Determine if the patient's **Current Answer** logically contradicts their **Previous Answers**, based strictly on the provided **Alignment Rule**.
 
-**INPUT STRUCTURE:**
-The "Context" below contains:
-1. **The Alignment Rule:** A clinical logic check (e.g., "If patient reports Insomnia, they usually report Fatigue").
-2. **Relevant Past Answers:** Specific quotes retrieved from previous questions.
+**INPUT CONTEXT:**
+1.  **Alignment Rule:** A specific clinical logic check (e.g., "If patient reports Insomnia, they usually report Fatigue").
+2.  **Relevant Past Answers:** Direct quotes retrieved from previous turns in the conversation.
 
-**LOGIC GUIDELINES:**
-- **CONSISTENT:** The current answer aligns with previous statements, or there is no relevant past data to check against.
-- **CONTRADICTING:** The current answer is logically impossible or highly unlikely given their previous answers (e.g., "I sleep 12 hours a day" vs "I never sleep").
-- **UNCERTAIN:** The answers seem different but might not be a hard contradiction.
+**LOGIC DEFINITIONS (The Standard):**
+* **CONSISTENT:** The current answer aligns with previous statements, or there is no relevant past data to check against.
+* **CONTRADICTING:** The current answer is logically impossible or highly unlikely given their previous answers (e.g., "I sleep 12 hours a day" vs "I never sleep").
+* **UNCERTAIN:** The answers seem different but might not be a hard contradiction (e.g., minor mood fluctuations).
+     
+**REFERENCE CASE STUDIES (Logic Types):**
 
+**Type 1: Physical Causality (e.g. Sleep -> Fatigue, Appetite -> Energy)**
+* *Rule:* "Severe sleep disturbance often leads to fatigue or concentration issues."
+* *Past History:* (Item 3) "I stare at the ceiling all night. I get maybe 2 hours of sleep."
+* *Current Answer:* (Item 4) "I have endless energy. I'm buzzing and running around all day."
+* *Verdict:* **CONTRADICTING**
+* *Reason:* "Physiological Mismatch: Severe sleep deprivation is physically incompatible with 'endless buzzing energy' (suggests Mania or inconsistency)."
+
+**Type 2: Emotional Coherence (e.g. Depression -> Anhedonia/Self-Esteem)**
+* *Rule:* "Deep depression typically correlates with loss of interest (Anhedonia)."
+* *Past History:* (Item 2) "I feel completely hopeless and cry every day."
+* *Current Answer:* (Item 1) "Oh, I'm having a blast! I go to parties, watch movies, I love everything right now."
+* *Verdict:* **CONTRADICTING**
+* *Reason:* "Emotional Mismatch: Claims of 'complete hopelessness' contradict the high pleasure/engagement reported here."
+
+**Type 3: Behavioral/Cognitive Alignment (e.g. Concentration -> Psychomotor)**
+* *Rule:* "Psychomotor agitation (restlessness) often makes concentration difficult."
+* *Past History:* (Item 8) "I can't sit still. I have to pace the room constantly."
+* *Current Answer:* (Item 7) "My focus is perfect. I just read a 300-page book in one sitting."
+* *Verdict:* **CONTRADICTING**
+* *Reason:* "Behavioral Mismatch: Extreme physical restlessness (pacing) logically conflicts with the ability to sit still and focus on a long book."
+
+**Type 4: Consistent (Expected Correlation)**
+* *Rule:* "Fatigue often lowers concentration."
+* *Past History:* (Item 4) "I'm always exhausted."
+* *Current Answer:* (Item 7) "Yeah, it's hard to focus on TV shows because I drift off."
+* *Verdict:* **CONSISTENT**
+* *Reason:* "Drifting focus is a logical consequence of the previously reported exhaustion."
+     
 **OUTPUT FORMAT:**
 Return strict JSON using **DOUBLE QUOTES**.
-Example: {{ "status": "CONTRADICTING", "reason": "Patient claims high energy now, but previously stated they sleep only 2 hours a night (Severe Insomnia)." }}
+Example: {{ "status": "CONTRADICTING", "reason": "Patient's claim of perfect focus contradicts earlier report of severe agitation." }}
 """),
     ("human", """**CURRENT ANSWER:**
 "{answer}"
@@ -426,21 +471,29 @@ Example: {{ "status": "CONTRADICTING", "reason": "Patient claims high energy now
 
 # 4. Navigation Agent
 navigation_template = ChatPromptTemplate.from_messages([
-    ("system", """You are the Navigation Control for a clinical interview.
+    ("system", """You are the **Interview Flow Manager**.
 
 **YOUR JOB:**
-Decide if we have enough information to move to the next question.
+Review the status reports and decide the next step in the clinical workflow.
 
-**LOGIC RULES:**
-1. **FOLLOW_UP** if:
-   - The patient was vague, unclear, or avoided the question.
-   - The Clarification Report says "Missing Information" (Timeframe, Frequency).
-   - There is a contradiction in the story.
+**INPUTS:**
+1. **Clarification Report:** Checks if the answer is vague, missing a timeframe, or irrelevant.
+2. **Alignment Report:** Checks if the answer contradicts previous statements.
 
-2. **NEXT_ITEM** (Meaning: Item Complete) if:
-   - The patient has clearly answered the question.
-   - We have a clear sense of frequency/duration.
-   - No further clarification is needed.
+**DECISION LOGIC (Strict Order):**
+
+**1. FOLLOW_UP**
+   *(Trigger if **ANY** of these flags are true)*
+   - **Clarification Issue:** Status is "INCOMPLETE" or "AMBIGUOUS".
+   - **Alignment Issue:** Status is "CONTRADICTING" (Logical/Physiological mismatch).
+   - **Vagueness:** The patient used non-committal words ("sometimes", "maybe").
+   - **Missing Data:** We do not know the Frequency (Days) or Duration.
+
+**2. NEXT_ITEM**
+   *(Trigger if **ALL** of these conditions are met)*
+   - **Data Quality:** The answer is clear and scorable.
+   - **Consistency:** The story is consistent (or "Uncertain" but not contradicting).
+   - **Completeness:** No further clarification is needed.
 
 **OUTPUT FORMAT:**
 Return strict JSON using **DOUBLE QUOTES**.
@@ -457,22 +510,22 @@ Example: {{ "next_action": "NEXT_ITEM", "instruction": "Proceed to next item." }
 
 # 5. Scoring Agent
 scoring_template = ChatPromptTemplate.from_messages([
-    ("system", """You are an expert clinician administering the PHQ-8 assessment.
+    ("system", """You are an expert clinician **scoring** the PHQ-8 assessment.
 
 **YOUR TASK:**
-Analyze the patient's history below to assign a score (0-3).
+Analyze the patient's complete history for the specific item below and assign a valid clinical score (0-3).
 
-**SCORING SCALE:**
-0 = Not at all
-1 = Several days
-2 = More than half the days
-3 = Nearly every day
+**SCORING RUBRIC (PHQ-8 Standard):**
+* **0 = Not at all** (No presence)
+* **1 = Several days** (Less than half the week)
+* **2 = More than half the days** (Significant portion of the week)
+* **3 = Nearly every day** (Constant or daily occurrence)
 
-**CRITICAL INSTRUCTIONS:**
-1. **Review the Criteria:** Strictly apply the definition provided in the prompt.
-2. **Analyze Context:** The history includes the dialogue, behavioral notes (vagueness/resistance), and logic checks.
-   - If the patient was **vague** or **resistant**, treat their answers with caution.
-   - If they **contradicted** themselves, rely on the final clarified answer.
+**EVALUATION PROTOCOL:**
+1.  **Strict Criteria Application:** Apply the specific definition provided in the prompt (Hypothesis) without deviation.
+2.  **Contextual Analysis:** Review the full dialogue history, including behavioral notes and logic checks.
+    * *Handling Vagueness:* If behavioral notes indicate resistance or ambiguity, treat initial answers with caution.
+    * *Handling Contradictions:* If the patient contradicted themselves, prioritize the **final clarified answer** over earlier statements.
 
 **OUTPUT FORMAT:**
 Return strict JSON using **DOUBLE QUOTES**.
@@ -601,8 +654,6 @@ def participant_node(state: AgentState):
     # This is the visual change you wanted
     if requested_level == "level3":
         print(f"   [Simulation] 🎲 Level 3 (Hard) -> Injected: {diff_mode.upper()}")
-    else:
-        print(f"   [Simulation] Mode: {diff_mode.upper()}")
 
     print(f"👤 Participant: {answer_text}")
     
@@ -671,42 +722,58 @@ def alignment_node(state: AgentState):
         "answer": state["last_answer"], 
         "history_str": smart_history_str
     })
-    return {"alignment_status": res.get("status", "CONSISTENT"), "alignment_reason": res.get("reason", "")}
+
+    return {
+        "alignment_status": res.get("status", "CONSISTENT"), 
+        "alignment_reason": res.get("reason", "")
+        }
 
 # 5. Navigation Node
 def navigation_node(state: AgentState):
     # 1. Get inputs from State
     missing_list = state.get("clarification_missing_domains", [])
     current_retries = state.get("followup_count", 0)
+    
+    # --- NEW: CHECK ALIGNMENT STATUS ---
+    # If Alignment found a contradiction, we ADD it to the "missing" list
+    # This forces the code to trigger a Follow-Up.
+    alignment_status = state.get("alignment_status", "CONSISTENT")
+    if alignment_status == "CONTRADICTING":
+        if "contradiction" not in missing_list:
+            missing_list.append("contradiction")
 
-    # Initialize variable to prevent UnboundLocalError
+    # Initialize variable
     style_guide = "Standard Follow-up" 
 
     # 2. Ask Navigation Agent for opinion
     res = (navigation_template | llm | json_parser).invoke({
         "c_stat": state["clarification_status"], 
         "c_reas": state["clarification_reason"],
-        "a_stat": state.get("clarification_status", "UNKNOWN"),  
-        "a_reas": state.get("clarification_reason", "None")
+        "a_stat": state.get("alignment_status", "UNKNOWN"),  
+        "a_reas": state.get("alignment_reason", "None")
     })
     
     proposed_action = res.get("next_action", "NEXT_ITEM")
     base_instruction = res.get("instruction", "")
 
     # 3. DECISION LOGIC
-    # CASE A: Max Retries Hit -> Force Score
+    
+    # CASE A: Max Retries Hit -> Force Next Item
     if proposed_action == "FOLLOW_UP" and current_retries >= 3:
         print(f"   [Logic] 🛑 MAX RETRIES ({current_retries}) HIT -> Forcing Next Item...")
         final_action = "NEXT_ITEM"
-        final_instruction = "Move to scoring."
+        final_instruction = "Move to next item."
         missing_list = [] 
     
-    # CASE B: Normal Follow-Up (Only if something is actually missing)
-    elif proposed_action == "FOLLOW_UP" and missing_list:
+    # CASE B: Normal Follow-Up (If Agent wants it OR we found a Contradiction)
+    # We added 'or "contradiction" in missing_list' to ensure it fires even if the LLM missed it.
+    elif (proposed_action == "FOLLOW_UP" and missing_list) or ("contradiction" in missing_list):
         final_action = "FOLLOW_UP"
         
         # I. Pick the Domain
-        if "relevance" in missing_list:
+        if "contradiction" in missing_list:
+            selected_domain = "contradiction" 
+        elif "relevance" in missing_list:
             selected_domain = "relevance"
         elif "timeframe" in missing_list:
             selected_domain = "timeframe"
@@ -715,7 +782,7 @@ def navigation_node(state: AgentState):
         else:
             selected_domain = missing_list[0]
 
-        # II. DEFINE STRATEGIES
+        # II. DEFINE STRATEGIES (Added Contradiction Strategy)
         ESCALATION_MAP = {
             "vagueness": [
                 "Ask naturally.",
@@ -731,6 +798,11 @@ def navigation_node(state: AgentState):
                 "Pivot gently back to the topic.",
                 "Be more direct. Acknowledge their point but explicitly ask about the symptom.",
                 "Directly link their story to the symptom. (e.g., 'Does that specific situation make you feel [Symptom]?')."
+            ],
+            "contradiction": [
+                "Gently mention the difference. (e.g. 'I'm a bit confused because you mentioned X earlier...')",
+                "Ask directly which one is more accurate right now.",
+                "Confront the inconsistency politely. (e.g. 'To get the score right, I need to know: is it X or Y?')"
             ]
         }
         
@@ -738,17 +810,18 @@ def navigation_node(state: AgentState):
         style_guide = strategies[min(current_retries, len(strategies)-1)]
 
         # III. Construct Instruction
+        # If it's a contradiction, we pull the reason from Alignment, otherwise Clarification
+        reason_context = state.get("alignment_reason") if selected_domain == "contradiction" else state.get("clarification_reason")
+
         final_instruction = (
-            f"Clarify ONLY the {selected_domain.upper()}. "
-            f"{style_guide} "
-            f"{base_instruction}"
+            f"Address the {selected_domain.upper()} issue. "
+            f"Context: {reason_context}. "
+            f"{style_guide}"
         )
     
     # CASE C: Score or Empty Missing List
     else:
-        # SAFETY CHECK: If Agent wants FOLLOW_UP but list is empty, FORCE NEXT.
         if proposed_action == "FOLLOW_UP" and not missing_list:
-             print("   [Logic] ⚠️  Agent wanted Follow-Up but nothing is missing -> Forcing Next.")
              final_action = "NEXT_ITEM"
              final_instruction = "Proceed to next item."
         elif state["current_item_id"] == "CLOSING":
@@ -758,9 +831,9 @@ def navigation_node(state: AgentState):
              final_action = proposed_action
              final_instruction = base_instruction
 
-    # 3. 4. Print Logic Status
+    # 4. Print Logic Status
     if final_action == "FOLLOW_UP":
-        print(f"   [Logic] ⚠️  MISSING: {missing_list} -> Strategy: {style_guide} (Attempt {current_retries + 1}/3)...")
+        print(f"   [Logic] ⚠️  ISSUE: {selected_domain.upper()} -> Strategy: {style_guide} (Attempt {current_retries + 1}/3)...")
         new_followup_count = current_retries + 1
     else:
         if state["current_item_id"] == "INTRO":
@@ -768,14 +841,12 @@ def navigation_node(state: AgentState):
         elif state["current_item_id"] == "CLOSING":
              print(f"   [Logic] 🏁  CLOSING -> Ending Experiment...")
         else:
-             # 👇 UPDATE THIS LINE 👇
              print(f"   [Logic] ✅  COMPLETE -> Next Item...")
              
         new_followup_count = 0
 
-    # 5. ENTAILMENT
-    items_data = state["items_evidence"] # Load existing data
-    # Only run Entailment if we are NOT in the Intro
+    # 5. ENTAILMENT (Preserved)
+    items_data = state["items_evidence"] 
     if state["current_item_id"] != "INTRO":
         probs = compute_nli_probs(state["last_answer"], state["current_hypothesis"])
         role = "neutral"
@@ -800,41 +871,29 @@ def navigation_node(state: AgentState):
             }
             items_data[item_key][role].append(entry)
 
-    # 6. ANALYTIC BLOCK (FIXED & ACCURATE)
-    # A. Get the Raw Difficulty from the Participant Node
+    # 6. ANALYTIC BLOCK (Standard)
     raw_mode = state.get("current_difficulty", "level1").lower()
     
-    # B. Map it to your Analytic Categories (The "Injected Flaw")
-    if raw_mode == "level1":
+    if raw_mode == "level1": 
         injected_flaw = "none"
-    elif raw_mode == "level2":
-        injected_flaw = "vagueness" # Level 2 Metaphors = Vagueness
-    elif raw_mode in ["vagueness", "timeframe", "relevance"]:
-        injected_flaw = raw_mode    # Exact match (e.g., from Level 3)
-    else:
-        # Fallback (e.g. if it says "level3" without a specific type)
+    elif raw_mode == "level2": 
+        injected_flaw = "vagueness" 
+    elif raw_mode in ["vagueness", "timeframe", "relevance"]: 
+        injected_flaw = raw_mode    
+    else: 
         injected_flaw = "vagueness" 
 
-    # C. Map Detected Flaw (What the bot actually found)
     detected_flaw = "none"
-    if missing_list:
-        detected_flaw = missing_list[0] 
+    if missing_list: detected_flaw = missing_list[0] 
 
-    # D. Turn Label
     turn_label = "Initial" if state["followup_count"] == 0 else f"FollowUp_{state['followup_count']}"
-
-    # E. Calculate Bot_Caught_Flaw (The Logic Check)
     bot_caught = False
     
-    # Case 1: No flaw injected -> Success is moving on
-    if injected_flaw == "none" and final_action == "NEXT_ITEM":
+    if injected_flaw == "none" and final_action == "NEXT_ITEM": 
         bot_caught = True
-        
-    # Case 2: Flaw injected -> Success is following up
-    elif injected_flaw != "none" and final_action == "FOLLOW_UP":
+    elif injected_flaw != "none" and final_action == "FOLLOW_UP": 
         bot_caught = True
 
-    # F. Create Record
     analytic_entry = {
         "PID": "PENDING", 
         "Item": state["current_item_id"],
@@ -847,7 +906,6 @@ def navigation_node(state: AgentState):
         "Participant_Text": state["last_answer"].replace('"', "'") 
     }
 
-    # Only append if NOT Intro
     current_analytics = state.get("analytics_records", [])
     if state["current_item_id"] != "INTRO":
         current_analytics.append(analytic_entry)
@@ -856,7 +914,7 @@ def navigation_node(state: AgentState):
     thought = {
         "item": state["current_item_id"],
         "clarification": state["clarification_status"],
-        "missing": missing_list,
+        "alignment": alignment_status, # Log this!
         "decision": final_action,
         "instruction": final_instruction
     }
@@ -866,7 +924,7 @@ def navigation_node(state: AgentState):
         "nav_instruction": final_instruction, 
         "agent_thoughts": state["agent_thoughts"] + [thought],
         "items_evidence": items_data,
-        "followup_count": new_followup_count # <--- This sends the 0 or >0 to the graph
+        "followup_count": new_followup_count 
     }
 
 # 6. Transition Node (FIXED: Properly loads next item)
@@ -1085,22 +1143,22 @@ def check_end(state: AgentState):
 def build_graph():
     workflow = StateGraph(AgentState)
 
+    # 1. ADD ALL NODES
     workflow.add_node("question_node", question_node)
     workflow.add_node("participant_node", participant_node)
     workflow.add_node("clarification_node", clarification_node)
+    workflow.add_node("alignment_node", alignment_node)
     workflow.add_node("navigation_node", navigation_node)
-    
-    # RENAME: scoring_node is now transition_node
     workflow.add_node("transition_node", transition_node) 
-    
-    # NEW: Add the batch scorer
     workflow.add_node("batch_scoring_node", batch_scoring_node)
 
+    # 2. DEFINE EDGES (The Flow)
     workflow.set_entry_point("question_node")
 
     workflow.add_edge("question_node", "participant_node")
     workflow.add_edge("participant_node", "clarification_node")
-    workflow.add_edge("clarification_node", "navigation_node")
+    workflow.add_edge("clarification_node", "alignment_node")
+    workflow.add_edge("alignment_node", "navigation_node")
 
     # Navigation logic (Split between Follow-up or Next Item)
     def check_nav(state):
@@ -1194,7 +1252,7 @@ def main():
     app = build_graph()
     
     # INCREASE RECURSION LIMIT to 150
-    final_state = app.invoke(state, {"recursion_limit": 150})
+    final_state = app.invoke(state, {"recursion_limit": 500})
 
     # SAVE FILES
     # =========================================================
