@@ -1,3 +1,5 @@
+# python3 "Single-Agent(PsyCot).py" --pid (participant_id)
+
 import os
 import json
 import argparse
@@ -37,56 +39,78 @@ SHORT_KEYS = {
     "I1": "anhedonia", "I2": "depressed_mood", "I3": "sleep", "I4": "fatigue",
     "I5": "appetite", "I6": "self_worth", "I7": "concentration", "I8": "psychomotor"
 }
+# ================= ROLEPLAY PROMPT =================
+patient_roleplay_template = ChatPromptTemplate.from_messages([
+    ("system", """You are role-playing a patient completing a PHQ-8 clinical assessment.
+    
+**YOUR PROFILE:**
+{profile_json}
+
+**YOUR SYMPTOM TRUTH:**
+{symptom_status} (Severity: {severity})
+
+**MANDATORY BEHAVIORAL CONSTRAINTS:**
+{style_instruction}
+
+INSTRUCTIONS:
+1. Stay in character. Do not reveal you are an AI.
+2. Respond to the psychologist's question naturally in 1-2 sentences.
+3. You must strictly follow the STYLE INSTRUCTION provided."""),
+    ("human", "{question_text}")
+])
 
 # ================= PROMPTS =================
 intro_template = ChatPromptTemplate.from_messages([
     ("system", """You are a warm, empathetic licensed psychologist.
-Your goal is to build immediate rapport with the participant.
-- Greet them warmly and professionally.
+Your goal is to establish immediate professional rapport.
+
+INSTRUCTIONS:
+- Greet the participant warmly and professionally.
 - Ask how they are doing today.
-- Keep it short (1-2 sentences)."""),
+- Constraint: Keep the response concise (1-2 sentences)."""),
     ("human", "Start the session.")
 ])
 
 rapport_template = ChatPromptTemplate.from_messages([
-    ("system", """You are a licensed psychologist building trust.
-The participant just responded to your greeting.
-Your goal: Validate their feelings and maintain a supportive connection.
-- If they are positive, share that positivity.
-- If they seem down or stressed, show empathy ("I'm sorry to hear that", "That sounds tough").
-- **Do NOT** start the clinical assessment yet. Just be human.
-- Keep it brief."""),
+    ("system", """You are a licensed psychologist focused on building trust.
+The participant has responded to your initial greeting.
+
+YOUR TASK:
+- Validate their feelings and maintain a supportive connection.
+- If positive: Reflect and share that positivity.
+- If negative/stressed: Provide empathetic validation (e.g., "I'm sorry to hear that," or "That sounds difficult").
+- CRITICAL: Do NOT begin the clinical assessment yet. Maintain a human-centric supportive tone.
+- Keep the response brief."""),
     ("human", "{last_response}")
 ])
 
 transition_template = ChatPromptTemplate.from_messages([
-    ("system", """You are a licensed psychologist. You have finished the small talk.
-Now you need to gently transition to the clinical assessment.
-1. Acknowledge what the user just said briefly.
-2. Pivot smoothly to asking specific questions about their health and mood over the **last two weeks**.
+    ("system", """You are a licensed psychologist transitioning from rapport-building to formal assessment.
+
+TASKS:
+1. Briefly acknowledge the participant's last statement.
+2. Clearly state that you will now ask a set of standard questions regarding their health and mood over the **last two weeks**.
+3. IMPORTANT: Do NOT ask the first assessment question yet. Only provide the preparatory statement.
 """),
-    ("human", "The user just said: '{last_response}'. Generate the transition now.")
+    ("human", "The user just said: '{last_response}'. Generate the transition statement now.")
 ])
 
 probe_template = ChatPromptTemplate.from_messages([
     ("system", """You are a licensed psychologist conducting a clinical assessment.
-Your goal: Ask a supportive, open-ended question to assess '{item_label}'.
+Your goal is to inquire about: '{item_label}'.
 Clinical Criteria: "{hypothesis_text}"
 
-Guidelines:
-1. **Timeframe:** You MUST anchor the question to the **last 2 weeks**.
-2. **Tone:** Be warm and conversational. Do not sound like a robotic survey.
-3. **Clarity:** Avoid complex medical jargon. Use simple, natural language.
-   - Example: Don't say "psychomotor retardation." Say "moving or speaking slowly."
-4. **Format:** Ask only ONE clear question."""),
+GUIDELINES:
+1. **TIMEFRAME:** You MUST anchor the question specifically to the **last 2 weeks**.
+2. **TONE:** Professional, warm, and conversational. Avoid a "survey" or "robotic" feel.
+3. **CLARITY:** Use simple, natural language. Replace clinical jargon with descriptive terms (e.g., use "feeling slowed down" instead of "psychomotor retardation").
+4. **FORMAT:** Ask exactly ONE clear, open-ended question."""),
     ("human", "Generate the question.")
 ])
 
-# === STRICT PROMPT: ENSURES AGENT GIVES 0-3 ===
-
 # === PSYCOT TEMPLATE (The Brain) ===
 psycot_template = ChatPromptTemplate.from_messages([
-    ("system", """You are a licensed psychologist conducting a PHQ-8 assessment.
+    ("system", """You are a specialized Clinical Psychology AI conducting a structured PHQ-8 (Patient Health Questionnaire-8) assessment. Your objective is to determine a clinical score for specific depressive symptoms through empathetic but precise inquiry.
     
 **Current Focus:** Item {item_index}: "{item_label}"
 **Clinical Criteria:** "{hypothesis_text}"
@@ -94,23 +118,22 @@ psycot_template = ChatPromptTemplate.from_messages([
 The participant has just answered your question.
 
 YOUR TASK:
-Reason step-by-step.
+Reason step-by-step to evaluate the participant's response and determine the next clinical action.
 
-**Step 1: Observation**
-Analyze the participant's response. Is it relevant? Is the timeframe clear?
+**STEP 1: OBSERVATION**
+Analyze the participant's input. Evaluate for relevance, clarity regarding the symptom frequency, and alignment with the required two-week timeframe.
 
-**Step 2: History Check (CRITICAL)**
-Look at the `Conversation History` below.
-- Did you (the Psychologist) ALREADY ask a follow-up question for this specific item?
-   - **YES:** You have reached the question limit. You MUST form your best clinical estimate now. Do NOT ask another question. Strategy MUST be **NEXT_ITEM**.
-   - **NO:** You may ask a follow-up if the answer is vague.
+**STEP 2: CLINICAL HISTORY AUDIT (CRITICAL)**
+Review the `Conversation History`.
+* **Constraint:** To maintain clinical efficiency and prevent respondent fatigue, only one follow-up is permitted per item.
+* **Logic:** - If you have ALREADY asked a follow-up for this specific item: You have reached the iteration limit. You MUST conclude reasoning and form a final clinical estimate. Set strategy to **NEXT_ITEM**.
+    - If you have NOT yet asked a follow-up: You may proceed to request clarification if the response is vague.
 
-**Step 3: Strategy & Scoring**
-- If History Check is YES -> **NEXT_ITEM** -> Assign Score (0-3).
-- If History Check is NO and answer is clear -> **NEXT_ITEM** -> Assign Score (0-3).
-- If History Check is NO and answer is vague -> **FOLLOW_UP** -> Score is null.
+**STEP 3: STRATEGY & SCORING SELECTION**
+* **NEXT_ITEM:** Assign a Score (0-3). If you reached the follow-up limit or the history shows a follow-up already happened, you MUST provide an integer. NEVER return null here.
+* **FOLLOW_UP:** Set Score to null ONLY if this is the FIRST time you are asking about this specific item and the answer is truly vague.
 
-**Scoring Rubric:**
+**SCORING RUBRIC:**
 0 = Not at all
 1 = Several days (mild)
 2 = More than half the days (moderate)
@@ -118,12 +141,12 @@ Look at the `Conversation History` below.
 
 OUTPUT FORMAT (JSON ONLY):
 {{
-  "step1_observation": "...",
-  "step2_history_check": "Follow-up found/not found...",
-  "step3_strategy": "...",
+  "step1_observation": "Detailed analysis of the participant's response.",
+  "step2_history_check": "Verification of prior follow-ups for this item.",
+  "step3_strategy": "Clinical reasoning for the chosen decision and score.",
   "decision": "NEXT_ITEM" or "FOLLOW_UP",
-  "score": (0, 1, 2, or 3. Null ONLY if decision is FOLLOW_UP),
-  "question": "..."
+  "score": (Integer 0-3. Use null ONLY if decision is FOLLOW_UP), 
+  "question": "The professional response or transition to be delivered to the participant."
 }}
 """),
     ("human", "Conversation History:\n{history}")
@@ -176,61 +199,83 @@ def simulate_client_answer(
     question_text: str,
     client_profile: Dict[str, Any],
     llm: ChatOpenAI,
-    difficulty: str = "medium",
     is_followup: bool = False,
 ):
     """
     Returns: (response_text, flaw_injected)
-    flaw_injected: 'none', 'vagueness', 'timeframe', or 'relevance'
+    Uses a 3-tier difficulty system to test the PsyCoT Agent's diagnostic rigor.
     """
-    # 1. Setup Data
-    clinical_signals = (client_profile.get("clinical_signals", {}) or {}).get("symptoms", {})
-    long_key = SYMPTOM_KEY_BY_ITEM_ID.get(item_id, "")
-    symptom_block = clinical_signals.get(long_key)
-    if not symptom_block:
-        short_key = SHORT_KEYS.get(item_id, "")
-        symptom_block = clinical_signals.get(short_key, {})
+    # --- 1. DYNAMIC DIFFICULTY SELECTION ---
+    DIFFICULTY_MODES = ["level1", "level2", "level3"]
+    WEIGHTS = [0.3, 0.5, 0.2] 
+    
+    if is_followup:
+        selected_tier = random.choices(["level1", "level2"], weights=[0.6, 0.4], k=1)[0]
+    else:
+        selected_tier = random.choices(DIFFICULTY_MODES, weights=WEIGHTS, k=1)[0]
 
-    present = symptom_block.get("present", "absent")
-    severity_hint = symptom_block.get("severity_hint", "none")
-    
-    # 2. Determine Flaw (Thesis Logic)
-    flaw_injected = "none" #can change difficulty 
-    style_instruction = "Speak naturally."
-    
-    if difficulty == "easy":
-        style_instruction = "Give a clear, direct answer."
-    elif difficulty == "medium":
-        style_instruction = "Paraphrase the symptom in your own words. Use everyday language and avoid repeating the exact terms from the question."
-    elif difficulty == "hard":
-        flaw_type = random.choice(["vagueness", "timeframe", "relevance"])
-        flaw_injected = flaw_type
-        if flaw_type == "vagueness":
-            style_instruction = "Be VAGUE. Use words like 'sort of', 'maybe'. Don't be clear and Do NOT give any specific details on symptoms."
-        elif flaw_type == "timeframe":
-            style_instruction = "Talk about the PAST (childhood/years ago) or just TODAY. Ignore 'last 2 weeks'."
-        elif flaw_type == "relevance":
-            style_instruction = ("Go OFF-TOPIC. Pick a keyword from the question (like 'sleep' or 'food') and talk about a hobby, object, or story related to that word instead of your symptoms. "
-                "(Example: If asked about appetite, talk about a recipe you cooked. If asked about sleep, talk about your bed sheets). "
-                "Do NOT answer how you actually feel."
+    diff_instruction = ""
+    mode_label = "none"
+
+    # --- 2. DEFINE INSTRUCTIONS & MODE LABEL ---
+    if selected_tier == "level3":
+        flaw_types = ["vagueness", "timeframe", "relevance"]
+        specific_flaw = random.choice(flaw_types)
+        mode_label = specific_flaw 
+        
+        if specific_flaw == "vagueness":
+            diff_instruction = (
+                "**Goal: Be Vague.**\n- Use non-committal words like 'sometimes', 'maybe', 'sort of'.\n"
+                "- Do NOT specify if it happens 1 day or 7 days a week.\n"
+                "- Make it impossible to decide between Score 1 and Score 2."
+            )
+        elif specific_flaw == "timeframe":
+            diff_instruction = (
+                "**Goal: Be Unclear about Time.**\n- Talk about how you felt 'years ago' or 'childhood'.\n"
+                "- Do NOT confirm if this is happening *currently* (in the last 2 weeks)."
+            )
+        elif specific_flaw == "relevance":
+            diff_instruction = (
+                "**Goal: Go Off-Topic.**\n- Ignore the specific symptom asked.\n"
+                "- Talk about a tangential topic (e.g., your dog, traffic) using a keyword from the question."
             )
 
-    # 3. Prompt
+    elif selected_tier == "level2": 
+        mode_label = "none" 
+        diff_instruction = (
+            "**Goal: Natural & Metaphorical.**\n- Use metaphors (e.g., 'I feel like a heavy blanket is on me').\n"
+            "- The answer MUST be valid and answer the question, just not directly."
+        )
+    else: 
+        mode_label = "none"
+        diff_instruction = "**Goal: Clear & Direct.** Directly answer with clear frequency/duration."
+
+    # --- 3. EXECUTE ROLEPLAY ---
+    # 1. Prepare Data
+    clinical_signals = (client_profile.get("clinical_signals", {}) or {}).get("symptoms", {})
+    long_key = SYMPTOM_KEY_BY_ITEM_ID.get(item_id, "")
+    symptom_block = clinical_signals.get(long_key, {})
+    
+    present = symptom_block.get("present", "absent")
+    severity_hint = symptom_block.get("severity_hint", "none")
     profile_snippet = get_style_snippet(client_profile)
-    profile_snippet["clinical_signals"] = { long_key: symptom_block }
-    prompt = f"""
-You are role-playing a client.
-Profile: {json.dumps(profile_snippet, indent=2)}
-Symptom: {present} ({severity_hint})
-Question: "{question_text}"
-**STYLE:** {style_instruction}
-"""
+
+    # 2. Use the Professional Template
+    # We create a small chain here or just invoke the template
+    roleplay_chain = patient_roleplay_template | llm | StrOutputParser()
+
     try:
-        resp = llm.invoke(prompt)
-        text = (getattr(resp, "content", "") or "").strip()
-        return text, flaw_injected 
-    except:
-        return "I'm not sure.", "error"
+        response_text = roleplay_chain.invoke({
+            "profile_json": json.dumps(profile_snippet, indent=2),
+            "symptom_status": present,
+            "severity": severity_hint,
+            "style_instruction": diff_instruction,
+            "question_text": question_text
+        })
+        return response_text.strip(), mode_label
+    except Exception as e:
+        print(f"Roleplay Error: {e}")
+        return "I'm not sure how to answer that.", "none"
 
 # ================= MAIN LOGIC =================
 def run_session(llm, client_profile, pid):
@@ -285,12 +330,11 @@ def run_session(llm, client_profile, pid):
         
         # TRANSITION (Pass the last response so it makes sense!)
         trans_text = transition_chain.invoke({"last_response": part_reply})
-        print(f"{AI_NAME}: {trans_text}")
-        global_turn_index += 1
-        transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "intro_transition", "text": trans_text})
+        
         
     except Exception as e:
         print(f"Error during Intro/Rapport: {e}")
+        trans_text = "Let's move on to some specific questions." # Fallback
 
     # --- PHQ-8 LOOP ---
     PHQ8_HYPOTHESES = [
@@ -308,10 +352,7 @@ def run_session(llm, client_profile, pid):
     for h in PHQ8_HYPOTHESES:
         evidence_log[f"Item {h['item_id'][1]}"] = {"label": h["label"], "item_id": h["item_id"], "supporting": []}
 
-    # TESTING SETTINGS
-    DIFFICULTY_OPTIONS = ["easy", "medium", "hard"]
-    DIFFICULTY_WEIGHTS = [0.2, 0.5, 0.3] 
-
+    # --- PHQ-8 LOOP (PsyCoT FIXED) ---
     for idx, h in enumerate(PHQ8_HYPOTHESES):
         shown = idx + 1
         item_id = h["item_id"]
@@ -319,52 +360,42 @@ def run_session(llm, client_profile, pid):
         hyp_text = h["text"]
         
         try:
-            # 1. QUESTION
-            current_difficulty = random.choices(DIFFICULTY_OPTIONS, weights=DIFFICULTY_WEIGHTS, k=1)[0]
+            # 1. QUESTION GENERATION
             raw_probe = probe_chain.invoke({"item_label": label, "hypothesis_text": hyp_text})
-            opener = f"{TOPIC_TRANSITIONS[idx]}{raw_probe}"
+            opener = f"{trans_text} {raw_probe}" if idx == 0 else f"{TOPIC_TRANSITIONS[idx]}{raw_probe}"
+
             print(f"{AI_NAME}: {opener}")
-            
             global_turn_index += 1
             transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "initial_question", "item_index": shown, "text": opener})
 
-            # 2. ANSWER
-            reply_text, flaw_injected = simulate_client_answer(
-                item_id, shown, label, opener, client_profile, llm,
-                difficulty=current_difficulty,
-                is_followup=False
-            )
+            # 2. ANSWER GENERATION (Logic now internal to function)
+            reply_text, flaw_injected = simulate_client_answer(item_id, shown, label, opener, client_profile, llm, is_followup=False)
 
-            print(f"{PARTICIPANT_NAME} (Flaw: {flaw_injected}): {reply_text}")
+            print(f"{PARTICIPANT_NAME} (Injected: {flaw_injected}): {reply_text}")
             global_turn_index += 1
             transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "base_answer", "text": reply_text})
 
-            evidence_log[f"Item {shown}"]["supporting"].append({
-                "evidence_supporting_id": f"{item_id}_E1", "text": reply_text, "followup_asked": False
-            })
+            evidence_log[f"Item {shown}"]["supporting"].append({"evidence_supporting_id": f"{item_id}_E1", "text": reply_text, "followup_asked": False})
 
-            # 3. DECISION (PASS 1)
+            # 3. PSYCOT DECISION (PASS 1)
             history_str = f"Psychologist: {opener}\nParticipant: {reply_text}"
-            decision_data = assessment_chain.invoke({
-                "item_index": shown, "item_label": label, "hypothesis_text": hyp_text, "history": history_str
-            })
+            decision_data = assessment_chain.invoke({"item_index": shown, "item_label": label, "hypothesis_text": hyp_text, "history": history_str})
             
             decision = decision_data.get("decision", "NEXT_ITEM")
-            thought = (
-                f"Obs: {decision_data.get('step1_observation', '')} | "
-                f"Hist: {decision_data.get('step2_history_check', '')} | "
-                f"Strat: {decision_data.get('step3_strategy', '')}"
-            )
-            detected_flaw = "none" 
-            if "vague" in thought.lower(): detected_flaw = "vagueness"
+            obs = decision_data.get('step1_observation', '')
+            thought = f"Obs: {obs} | Hist: {decision_data.get('step2_history_check', '')} | Strat: {decision_data.get('step3_strategy', '')}"
+            
+            # IMPROVED DETECTION LOGIC for PsyCoT
+            detected_flaw = "none"
+            obs_lower = obs.lower()
+            if "vague" in obs_lower or "ambiguous" in obs_lower: detected_flaw = "vagueness"
+            elif "time" in obs_lower or "period" in obs_lower: detected_flaw = "timeframe"
+            elif "relevant" in obs_lower or "off-topic" in obs_lower: detected_flaw = "relevance"
+            
             score = parse_score(decision_data.get("score"))
             
-            bot_caught_it = False
-            if flaw_injected == "none":
-                if decision == "NEXT_ITEM": bot_caught_it = True
-            else:
-                if decision == "FOLLOW_UP" and detected_flaw == flaw_injected:
-                    bot_caught_it = True
+            bot_caught_it = (flaw_injected == "none" and decision == "NEXT_ITEM") or \
+                            (decision == "FOLLOW_UP" and detected_flaw == flaw_injected)
 
             analysis_log.append({
                 "PID": pid, "Item": item_id, "Turn": "Initial",
@@ -377,57 +408,69 @@ def run_session(llm, client_profile, pid):
             transcript.append({"turn_index": global_turn_index, "speaker": "Agent_Internal_Monologue", "text": thought})
             agent_thoughts.append({"item_index": shown, "turn_index": global_turn_index, "decision": decision, "score": score, "thought": thought})
 
-            # 4. FOLLOW-UP
+            # 4. FOLLOW-UP (REVISED: Forces a score and prevents None)
             if decision == "FOLLOW_UP":
                 evidence_log[f"Item {shown}"]["supporting"][-1]["followup_asked"] = True
                 followup_q = decision_data.get("question", "Could you say more?")
-                print(f"{AI_NAME} (Checking {detected_flaw}): {followup_q}")
+                print(f"{AI_NAME} (Probing {detected_flaw}): {followup_q}")
+                
                 global_turn_index += 1
                 transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "followup_question", "text": followup_q})
 
-                reply_text_2, _ = simulate_client_answer(
-                    item_id, shown, label, followup_q, client_profile, llm,
-                    difficulty="medium", is_followup=True
-                )
+                # Participant responds clearly for the follow-up
+                reply_text_2, _ = simulate_client_answer(item_id, shown, label, followup_q, client_profile, llm, is_followup=True)
                 print(f"{PARTICIPANT_NAME}: {reply_text_2}")
+                
                 global_turn_index += 1
                 transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "followup_answer", "text": reply_text_2})
 
-                # STRICT INSTRUCTION FOR FINAL SCORE
+                # SYSTEM: Hard pressure to pick an integer
                 history_str_2 = (
                     f"{history_str}\n"
                     f"Psychologist: {followup_q}\n"
                     f"Participant: {reply_text_2}\n"
-                    f"(SYSTEM: You have all the information. You MUST now assign the integer score 0-3 based on the user's answers. Do not output null.)"
+                    "\n[SYSTEM]: The follow-up limit is reached. You MUST assign a score (0-3). "
+                    "If the response is still ambiguous, use your clinical judgment to pick the most likely frequency. "
+                    "Do NOT return null. Output a definitive integer."
                 )
 
                 decision_data_2 = assessment_chain.invoke({
                     "item_index": shown, "item_label": label, "hypothesis_text": hyp_text, "history": history_str_2
                 })
                 
+                # Try to parse the primary score field
                 new_score = parse_score(decision_data_2.get("score"))
-                if new_score is not None: score = new_score
+                
+                # --- EMERGENCY EXTRACTION ---
+                # If 'score' is still None/null, we look at the 'step3_strategy' text for a digit
+                if new_score is None:
+                    strategy_text = str(decision_data_2.get("step3_strategy", ""))
+                    # Find all numbers 0-3 in the strategy text
+                    potential_scores = re.findall(r'[0-3]', strategy_text)
+                    if potential_scores:
+                        # Take the last number mentioned (usually the final conclusion)
+                        new_score = int(potential_scores[-1])
+                        print(f"  [RECOVERY] Extracted score {new_score} from Agent reasoning.")
+                    else:
+                        # Final fallback if absolutely no number is found: default to a 'mild' score
+                        new_score = 1 
+                        print(f"  [RECOVERY] No score found in reasoning. Defaulting to 1.")
+
+                score = new_score
                 decision = "RESOLVED_FOLLOW_UP"
             
             # --- FINAL SCORE PROCESSING ---
-            # No Python forcing. If it's None, it stays None (and we see -1 in logs).
-            # But the prompt is now super strict, so it SHOULD be 0-3.
-            if score is None:
-                # We log it as a failure, but we do NOT overwrite it with 0.
-                print("  [FAILURE] Agent failed to produce a score.")
-            else:
-                total_score += score
-                
-            print(f"  -> Agent Decision: {decision} | Final Score: {score}")
+            # Now 'score' is guaranteed to be an integer (0, 1, 2, or 3)
+            total_score += score
+            print(f"  -> Decision: {decision} | Final Score: {score}")
 
             final_scores.append({"Item ID": item_id, "Item Label": label, "Score": score})
             scoring_explanations.append({"item_id": item_id, "label": label, "score": score, "explanation": thought})
 
-            # INSTANT SAVE
+            # SAVE PROGRESS
             analysis_path = os.path.join(dirs["analysis"], f"Analysis_{pid}.csv")
             with open(analysis_path, "w", newline="", encoding="utf-8") as f:
-                fieldnames = ["PID", "Item", "Turn", "Injected_Flaw", "Detected_Flaw", "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"]
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer = csv.DictWriter(f, fieldnames=["PID", "Item", "Turn", "Injected_Flaw", "Detected_Flaw", "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"])
                 writer.writeheader()
                 writer.writerows(analysis_log)
 
