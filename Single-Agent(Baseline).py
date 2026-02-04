@@ -39,7 +39,25 @@ SHORT_KEYS = {
     "I1": "anhedonia", "I2": "depressed_mood", "I3": "sleep", "I4": "fatigue",
     "I5": "appetite", "I6": "self_worth", "I7": "concentration", "I8": "psychomotor"
 }
+# ================= ROLEPLAY PROMPT =================
+patient_roleplay_template = ChatPromptTemplate.from_messages([
+    ("system", """You are role-playing a patient completing a PHQ-8 clinical assessment.
+    
+**YOUR PROFILE:**
+{profile_json}
 
+**YOUR SYMPTOM TRUTH:**
+{symptom_status} (Severity: {severity})
+
+**MANDATORY BEHAVIORAL CONSTRAINTS:**
+{style_instruction}
+
+INSTRUCTIONS:
+1. Stay in character. Do not reveal you are an AI.
+2. Respond to the psychologist's question naturally in 1-2 sentences.
+3. You must strictly follow the STYLE INSTRUCTION provided."""),
+    ("human", "{question_text}")
+])
 # ================= PROMPTS =================
 intro_template = ChatPromptTemplate.from_messages([
     ("system", """You are a warm, empathetic licensed psychologist.
@@ -212,6 +230,7 @@ def simulate_client_answer(
         diff_instruction = "**Goal: Clear & Direct.** Be helpful and explicit. Answer with clear frequency."
 
     # --- 3. EXECUTE THE ROLEPLAY ---
+    # 1. Prepare Data
     clinical_signals = (client_profile.get("clinical_signals", {}) or {}).get("symptoms", {})
     long_key = SYMPTOM_KEY_BY_ITEM_ID.get(item_id, "")
     symptom_block = clinical_signals.get(long_key, {})
@@ -220,22 +239,21 @@ def simulate_client_answer(
     severity_hint = symptom_block.get("severity_hint", "none")
     profile_snippet = get_style_snippet(client_profile)
 
-    prompt = f"""
-You are role-playing a patient in a mental health screening.
-Profile: {json.dumps(profile_snippet)}
-Your Truth (Symptom): {present} ({severity_hint})
-Question asked to you: "{question_text}"
+    # 2. Use the Professional Template
+    # We create a small chain here or just invoke the template
+    roleplay_chain = patient_roleplay_template | llm | StrOutputParser()
 
-**MANDATORY STYLE INSTRUCTION:**
-{diff_instruction}
-
-Respond as the patient in 1-2 sentences.
-"""
     try:
-        resp = llm.invoke(prompt)
-        text = resp.content.strip()
-        return text, mode_label 
+        response_text = roleplay_chain.invoke({
+            "profile_json": json.dumps(profile_snippet, indent=2),
+            "symptom_status": present,
+            "severity": severity_hint,
+            "style_instruction": diff_instruction,
+            "question_text": question_text
+        })
+        return response_text.strip(), mode_label
     except Exception as e:
+        print(f"Roleplay Error: {e}")
         return "I'm not sure how to answer that.", "none"
     
 # ================= MAIN LOGIC =================
