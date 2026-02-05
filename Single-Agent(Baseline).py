@@ -223,14 +223,14 @@ def simulate_client_answer(
             )
 
     elif selected_tier == "level2": 
-        mode_label = "none" # Paraphrasing is technically valid, not a "flaw" to be caught
+        mode_label = "VAGUENESS" # Paraphrasing is technically valid, not a "flaw" to be caught
         diff_instruction = (
             "**Goal: Natural & Metaphorical.** Do NOT use clinical terms. "
             "Use metaphors (e.g., 'I feel like a heavy blanket is on me'). "
             "The answer MUST be valid, just not direct."
         )
     else: 
-        mode_label = "none"
+        mode_label = "NONE"
         diff_instruction = "**Goal: Clear & Direct.** Be helpful and explicit. Answer with clear frequency."
 
     # --- 3. EXECUTE THE ROLEPLAY ---
@@ -245,20 +245,21 @@ def simulate_client_answer(
 
     # 2. Use the Professional Template
     # We create a small chain here or just invoke the template
-    roleplay_chain = patient_roleplay_template | llm | StrOutputParser()
+    roleplay_chain = patient_roleplay_template | llm | StrOutputParser() 
 
     try:
         response_text = roleplay_chain.invoke({
             "profile_json": json.dumps(profile_snippet, indent=2),
             "symptom_status": present,
             "severity": severity_hint,
-            "style_instruction": diff_instruction,
+            "style_instruction": diff_instruction, #formatted_diff
             "question_text": question_text
         })
-        return response_text.strip(), mode_label
+        # CHANGE: Return selected_tier as the third item in the tuple
+        return response_text.strip(), mode_label, selected_tier 
     except Exception as e:
         print(f"Roleplay Error: {e}")
-        return "I'm not sure how to answer that.", "none"
+        return "I'm not sure how to answer that.", "none", "level1"
     
 # ================= MAIN LOGIC =================
 def run_session(llm, client_profile, pid):
@@ -364,7 +365,7 @@ def run_session(llm, client_profile, pid):
 
             # 2. GENERATE THE PARTICIPANT'S ANSWER (Using the new tiered logic)
             # Note: current_difficulty is now handled internally by simulate_client_answer
-            reply_text, flaw_injected = simulate_client_answer(
+            reply_text, flaw_injected, level_selected = simulate_client_answer(
                 item_id, shown, label, opener, client_profile, llm,
                 is_followup=False
             )
@@ -398,9 +399,14 @@ def run_session(llm, client_profile, pid):
                     bot_caught_it = True
 
             analysis_log.append({
-                "PID": pid, "Item": item_id, "Turn": "Initial",
-                "Injected_Flaw": flaw_injected, "Detected_Flaw": detected_flaw,
-                "Agent_Decision": decision, "Bot_Caught_Flaw": bot_caught_it,
+                "PID": pid, 
+                "Item": item_id, 
+                "Turn": "Initial",
+                "Level": level_selected,  # <--- NEW FIELD
+                "Injected_Flaw": flaw_injected, 
+                "Detected_Flaw": detected_flaw,
+                "Agent_Decision": decision, 
+                "Bot_Caught_Flaw": bot_caught_it,
                 "Agent_Score": score if score is not None else -1, 
                 "Participant_Text": reply_text
             })
@@ -418,7 +424,7 @@ def run_session(llm, client_profile, pid):
                 transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "followup_question", "text": followup_q})
 
                 # Participant responds more clearly for follow-ups
-                reply_text_2, _ = simulate_client_answer(
+                reply_text_2, _, _ = simulate_client_answer(
                     item_id, shown, label, followup_q, client_profile, llm,
                     is_followup=True
                 )
@@ -453,7 +459,11 @@ def run_session(llm, client_profile, pid):
             # Save progress to CSV after every item
             analysis_path = os.path.join(dirs["analysis"], f"Analysis_{pid}.csv")
             with open(analysis_path, "w", newline="", encoding="utf-8") as f:
-                fieldnames = ["PID", "Item", "Turn", "Injected_Flaw", "Detected_Flaw", "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"]
+                # CHANGE: Added "Level" to fieldnames
+                fieldnames = [
+                    "PID", "Item", "Turn", "Level", "Injected_Flaw", "Detected_Flaw", 
+                    "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"
+                ]
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(analysis_log)
