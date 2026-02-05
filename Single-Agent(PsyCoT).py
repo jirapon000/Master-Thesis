@@ -245,13 +245,13 @@ def simulate_client_answer(
             )
 
     elif selected_tier == "level2": 
-        mode_label = "none" 
+        mode_label = "VAGUENESS" 
         diff_instruction = (
             "**Goal: Natural & Metaphorical.**\n- Use metaphors (e.g., 'I feel like a heavy blanket is on me').\n"
             "- The answer MUST be valid and answer the question, just not directly."
         )
     else: 
-        mode_label = "none"
+        mode_label = "NONE"
         diff_instruction = "**Goal: Clear & Direct.** Directly answer with clear frequency/duration."
 
     # --- 3. EXECUTE ROLEPLAY ---
@@ -276,10 +276,12 @@ def simulate_client_answer(
             "style_instruction": diff_instruction,
             "question_text": question_text
         })
-        return response_text.strip(), mode_label
+        # CHANGE: Add selected_tier to the return
+        return response_text.strip(), mode_label, selected_tier 
     except Exception as e:
         print(f"Roleplay Error: {e}")
-        return "I'm not sure how to answer that.", "none"
+        # CHANGE: Add a default level here too
+        return "I'm not sure how to answer that.", "none", "level1"
 
 # ================= MAIN LOGIC =================
 def run_session(llm, client_profile, pid):
@@ -373,8 +375,9 @@ def run_session(llm, client_profile, pid):
             transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "initial_question", "item_index": shown, "text": opener})
 
             # 2. ANSWER GENERATION (Logic now internal to function)
-            reply_text, flaw_injected = simulate_client_answer(item_id, shown, label, opener, client_profile, llm, is_followup=False)
-
+            reply_text, flaw_injected, level_selected = simulate_client_answer(
+                item_id, shown, label, opener, client_profile, llm, is_followup=False
+            )
             print(f"{PARTICIPANT_NAME} (Injected: {flaw_injected}): {reply_text}")
             global_turn_index += 1
             transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "base_answer", "text": reply_text})
@@ -402,9 +405,14 @@ def run_session(llm, client_profile, pid):
                             (decision == "FOLLOW_UP" and detected_flaw == flaw_injected)
 
             analysis_log.append({
-                "PID": pid, "Item": item_id, "Turn": "Initial",
-                "Injected_Flaw": flaw_injected, "Detected_Flaw": detected_flaw,
-                "Agent_Decision": decision, "Bot_Caught_Flaw": bot_caught_it,
+                "PID": pid, 
+                "Item": item_id, 
+                "Turn": "Initial",
+                "Level": level_selected,  # <--- Add this line
+                "Injected_Flaw": flaw_injected, 
+                "Detected_Flaw": detected_flaw,
+                "Agent_Decision": decision, 
+                "Bot_Caught_Flaw": bot_caught_it,
                 "Agent_Score": score if score is not None else -1, 
                 "Participant_Text": reply_text
             })
@@ -422,7 +430,9 @@ def run_session(llm, client_profile, pid):
                 transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "followup_question", "text": followup_q})
 
                 # Participant responds clearly for the follow-up
-                reply_text_2, _ = simulate_client_answer(item_id, shown, label, followup_q, client_profile, llm, is_followup=True)
+                reply_text_2, _, _ = simulate_client_answer( # Added extra _,
+                    item_id, shown, label, followup_q, client_profile, llm, is_followup=True
+                )
                 print(f"{PARTICIPANT_NAME}: {reply_text_2}")
                 
                 global_turn_index += 1
@@ -474,7 +484,9 @@ def run_session(llm, client_profile, pid):
             # SAVE PROGRESS
             analysis_path = os.path.join(dirs["analysis"], f"Analysis_{pid}.csv")
             with open(analysis_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=["PID", "Item", "Turn", "Injected_Flaw", "Detected_Flaw", "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"])
+                # Added "Level" to the list below
+                fieldnames = ["PID", "Item", "Turn", "Level", "Injected_Flaw", "Detected_Flaw", "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"]
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(analysis_log)
 
