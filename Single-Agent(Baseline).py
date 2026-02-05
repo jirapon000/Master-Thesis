@@ -432,6 +432,14 @@ def run_session(llm, client_profile, pid):
                 global_turn_index += 1
                 transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "followup_answer", "text": reply_text_2})
 
+                analysis_log.append({
+                    "PID": pid, "Item": item_id, "Turn": "Follow-up", # Changed to Follow-up
+                    "Level": level_selected, "Injected_Flaw": "REVEALED", 
+                    "Detected_Flaw": "none", "Agent_Decision": "RESOLVING", 
+                    "Bot_Caught_Flaw": True, "Agent_Score": -1, # Temporary score
+                    "Participant_Text": reply_text_2
+                })
+
                 history_str_2 = (
                     f"{history_str}\n"
                     f"Psychologist: {followup_q}\n"
