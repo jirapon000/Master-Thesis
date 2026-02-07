@@ -37,14 +37,14 @@ NEUTRAL_THRESHOLD = 0.6
 
 # ================= GLOBAL DATA =================
 PHQ8_HYPOTHESES = [
-    {"item_id": "I1", "label": "Anhedonia",       "text": "Little interest or pleasure in doing things."},
-    {"item_id": "I2", "label": "Depressed mood",  "text": "Feeling depressed, down, or hopeless."},
-    {"item_id": "I3", "label": "Sleep problems",  "text": "Trouble falling or staying asleep, or sleeping too much."},
-    {"item_id": "I4", "label": "Fatigue",         "text": "Feeling tired or having little energy."},
-    {"item_id": "I5", "label": "Appetite change", "text": "Poor appetite or overeating."},
-    {"item_id": "I6", "label": "Self-worth",      "text": "Feeling bad about yourself or that you are a failure."},
-    {"item_id": "I7", "label": "Concentration",   "text": "Trouble concentrating on things."},
-    {"item_id": "I8", "label": "Psychomotor",     "text": "Moving or speaking so slowly (or being fidgety/restless)."}
+    {"item_id": "I1", "label": "Anhedonia",       "text": "The individual feels little interest or pleasure in doing things."},
+    {"item_id": "I2", "label": "Depressed mood",  "text": "The individual feels down, depressed, or hopeless."},
+    {"item_id": "I3", "label": "Sleep problems",  "text": "The individual has trouble falling or staying asleep, or sleeps too much."},
+    {"item_id": "I4", "label": "Fatigue",         "text": "The individual feels tired or has little energy."},
+    {"item_id": "I5", "label": "Appetite change", "text": "The individual has a poor appetite or overeats."},
+    {"item_id": "I6", "label": "Self-worth",      "text": "The individual feels bad about themselves or feels like a failure."},
+    {"item_id": "I7", "label": "Concentration",   "text": "The individual has trouble concentrating on things, such as reading or watching television."},
+    {"item_id": "I8", "label": "Psychomotor",     "text": "The individual is moving or speaking so slowly that others could notice, or is fidgety and restless."}
 ]
 
 SYMPTOM_KEY_BY_ITEM_ID: Dict[str, str] = {
@@ -124,15 +124,15 @@ def simulate_client_answer(
     client_profile: Dict[str, Any],
     llm: ChatOpenAI,
     is_followup: bool = False,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """
     Generate a simulated client answer with DYNAMIC difficulty.
     It randomly selects a difficulty level based on defined weights.
     """
     # --- 1. DYNAMIC DIFFICULTY SELECTION ---
     DIFFICULTY_MODES = ["level1", "level2", "level3"]
-    # Weights: 10% Direct, 50% Paraphrase, 40% Ambiguous
-    WEIGHTS = [0.1, 0.3, 0.6] 
+    # Weights: 30% Direct, 50% Paraphrase, 20% Ambiguous
+    WEIGHTS = [0.3, 0.5, 0.2] 
     
     selected_tier = random.choices(DIFFICULTY_MODES, weights=WEIGHTS, k=1)[0]
 
@@ -171,7 +171,7 @@ def simulate_client_answer(
 
     elif selected_tier == "level2": 
         # LEVEL 2: PARAPHRASE (Complex but Valid)
-        mode_label = "VAGUENESS" # Injected_Flaw will be mapped to 'none' later
+        mode_label = "VAGUENESS"
         diff_instruction = (
             "**Goal: Natural & Metaphorical.**\n"
             "- Do NOT use clinical terms.\n"
@@ -256,7 +256,8 @@ def simulate_client_answer(
         })
         
         text = resp.strip()
-        return (text if text else "...", mode_label)
+        # Return TEXT, LABEL, and the LEVEL (selected_tier)
+        return (text if text else "...", mode_label, selected_tier)
         
     except Exception as e:
         print(f"Simulation Error: {e}")
@@ -303,6 +304,7 @@ class AgentState(TypedDict):
     # --- NEW FIELDS FOR ANALYTICS ---
     analytics_records: List[Dict] # Stores the rows for the CSV
     current_difficulty: str       # Tracks "level1", "level3" etc. for the current turn
+    current_level: str
 
     # --- Symotoms Analysis ---
     symptom_summaries: List[Dict]
@@ -663,7 +665,7 @@ def participant_node(state: AgentState):
     requested_level = state.get("current_difficulty", "level1") 
     
     # 3. Run Simulation (KEPT EXACTLY AS IS)
-    answer_text, diff_mode = simulate_client_answer(
+    answer_text, diff_mode, diff_level = simulate_client_answer(
         item_id=state["current_item_id"],
         item_index=state["current_item_index"],
         item_label=state["current_item_label"],
@@ -697,7 +699,8 @@ def participant_node(state: AgentState):
         "last_answer": answer_text, 
         "history": new_hist, 
         "transcript": state["transcript"] + [turn],
-        "current_difficulty": diff_mode, 
+        "current_difficulty": diff_mode,
+        "current_level": diff_level,
         "simulation_mode": diff_mode     # Added this just to be safe
     }
 
@@ -897,6 +900,7 @@ def navigation_node(state: AgentState):
 
     # 6. ANALYTIC BLOCK (Standard)
     raw_mode = state.get("current_difficulty", "level1").lower()
+    current_lvl = state.get("current_level", "level1")
     
     if raw_mode == "level1": 
         injected_flaw = "none"
@@ -922,6 +926,7 @@ def navigation_node(state: AgentState):
         "PID": "PENDING", 
         "Item": state["current_item_id"],
         "Turn": turn_label,
+        "Level": current_lvl,
         "Injected_Flaw": injected_flaw, 
         "Detected_Flaw": detected_flaw,
         "Agent_Decision": final_action, 
@@ -1340,7 +1345,7 @@ def main():
             r["Agent_Decision"] = "NEXT_ITEM"
 
     if records:
-        keys = ["PID", "Item", "Turn", "Injected_Flaw", "Detected_Flaw", "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"]
+        keys = ["PID", "Item", "Turn", "Level", "Injected_Flaw", "Detected_Flaw", "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"]
         with open(analytics_path, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=keys)
             w.writeheader()
