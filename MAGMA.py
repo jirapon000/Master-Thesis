@@ -127,66 +127,65 @@ def simulate_client_answer(
 ) -> tuple[str, str, str]:
     """
     Generate a simulated client answer with DYNAMIC difficulty.
-    It randomly selects a difficulty level based on defined weights.
     """
     # --- 1. DYNAMIC DIFFICULTY SELECTION ---
-    DIFFICULTY_MODES = ["level1", "level2", "level3"]
-    # Weights: 30% Direct, 50% Paraphrase, 20% Ambiguous
-    WEIGHTS = [0.3, 0.5, 0.2] 
-    
-    selected_tier = random.choices(DIFFICULTY_MODES, weights=WEIGHTS, k=1)[0]
+    # Force Level 1 for Follow-ups or Intro/Closing
+    if is_followup or item_id in ["INTRO", "CLOSING"]:
+        selected_tier = "level1"
+    else:
+        # Weights: 30% Clear, 50% Single Flaw, 20% Total Chaos
+        DIFFICULTY_MODES = ["level1", "level2", "level3"]
+        WEIGHTS = [0.3, 0.5, 0.2] 
+        selected_tier = random.choices(DIFFICULTY_MODES, weights=WEIGHTS, k=1)[0]
 
     # --- 2. DEFINE INSTRUCTIONS & MODE LABEL ---
+    
+    # LEVEL 3: ALL FLAWS COMBINED (Hard Mode)
     if selected_tier == "level3":
-        # LEVEL 3: FLAWS (Randomly pick WHICH flaw to inject)
+        mode_label = "ALL_FLAWS"
+        diff_instruction = (
+            "**Goal: TOTAL OBSTRUCTION (Active Resistance).**\n"
+            "You do NOT want to answer this question directly. Be difficult.\n"
+            "1. **Deflect (Relevance):** Immediately complain about something else (e.g., 'Why does that matter?', 'I'm just tired of all these questions', 'The economy is the real problem').\n"
+            "2. **Blur the Time (Timeframe):** If forced to speak, only mention 'years ago' or 'back in the day'. Refuse to talk about the last 2 weeks.\n"
+            "3. **Be Non-Committal (Vagueness):** Use words like 'whatever', 'sometimes', or 'it depends'. Give NO useful data.\n"
+            "**Combine these into a single, frustrated response.**"
+        )
+
+    # LEVEL 2: SINGLE FLAW (Randomly pick one)
+    elif selected_tier == "level2": 
         flaw_types = ["vagueness", "timeframe", "relevance"]
         specific_flaw = random.choice(flaw_types)
         
-        mode_label = specific_flaw # This becomes the 'Injected_Flaw'
+        # LABEL: Uses the specific name (e.g. "TIMEFRAME")
+        mode_label = specific_flaw.upper()
 
-        if item_id in ["INTRO", "CLOSING"]:
-            selected_tier = "level1"
-        
         if specific_flaw == "vagueness":
             diff_instruction = (
                 "**Goal: Be Vague.**\n"
                 "- Use non-committal words like 'sometimes', 'maybe', 'sort of'.\n"
-                "- Do NOT specify if it happens 1 day or 7 days a week.\n"
-                "- Make it impossible to decide between Score 1 and Score 2."
+                "- Do NOT specify if it happens 1 day or 7 days a week."
             )
         elif specific_flaw == "timeframe":
             diff_instruction = (
                 "**Goal: Be Unclear about Time.**\n"
-                "- Talk about how you felt 'years ago' or 'in the past'.\n"
-                "- Do NOT confirm if this is happening *currently* (in the last 2 weeks).\n"
-                "- Use phrases like 'I used to feel...' or 'Back when I was working...'"
+                "- Talk about the past ('years ago') or future ('if X happens').\n"
+                "- Do NOT confirm if this is happening *currently*."
             )
         elif specific_flaw == "relevance":
             diff_instruction = (
                 "**Goal: Go Off-Topic (Irrelevant).**\n"
                 "- Ignore the specific symptom asked.\n"
-                "- Talk about a tangential topic (e.g., your dog, the traffic, politics).\n"
-                "- Mention the keyword but in the wrong context."
+                "- Talk about a tangential topic (e.g., your dog, traffic) instead of your feelings."
             )
 
-    elif selected_tier == "level2": 
-        # LEVEL 2: PARAPHRASE (Complex but Valid)
-        mode_label = "VAGUENESS"
-        diff_instruction = (
-            "**Goal: Natural & Metaphorical.**\n"
-            "- Do NOT use clinical terms.\n"
-            "- Use metaphors (e.g., 'I feel like a heavy blanket is on me').\n"
-            "- The answer MUST be valid and answer the question, just not directly."
-        )
-        
+    # LEVEL 1: DIRECT (Control)
     else: 
-        # LEVEL 1: DIRECT (Clear)
         mode_label = "NONE"
         diff_instruction = (
             "**Goal: Clear & Direct.**\n"
             "- Be helpful and explicit.\n"
-            "- Directly answer the question with clear frequency/duration."
-
+            "- Directly answer the question with clear frequency (e.g. '3 days a week') and duration."
         )
 
     # --- 3. EXTRACT PROFILE & STYLE (Restored) ---
@@ -678,8 +677,10 @@ def participant_node(state: AgentState):
     
     # 4. Print Logic (UPDATED)
     # This is the visual change you wanted
-    if requested_level == "level3":
+    if diff_level == "level3":
         print(f"   [Simulation] 🎲 Level 3 (Hard) -> Injected: {diff_mode.upper()}")
+    elif diff_level == "level2":
+        print(f"   [Simulation] 🎲 Level 2 (Medium) -> Injected: {diff_mode.upper()}")
 
     print(f"👤 Participant: {answer_text}")
     
@@ -784,7 +785,6 @@ def navigation_node(state: AgentState):
     base_instruction = res.get("instruction", "")
 
     # 3. DECISION LOGIC
-    
     # CASE A: Max Retries Hit -> Force Next Item
     if proposed_action == "FOLLOW_UP" and current_retries >= 3:
         print(f"   [Logic] 🛑 MAX RETRIES ({current_retries}) HIT -> Forcing Next Item...")
@@ -898,18 +898,20 @@ def navigation_node(state: AgentState):
             }
             items_data[item_key][role].append(entry)
 
-    # 6. ANALYTIC BLOCK (Standard)
-    raw_mode = state.get("current_difficulty", "level1").lower()
+    # 6. ANALYTIC BLOCK
+    raw_mode = state.get("current_difficulty", "none").lower()
     current_lvl = state.get("current_level", "level1")
     
-    if raw_mode == "level1": 
+    if raw_mode == "none": 
         injected_flaw = "none"
-    elif raw_mode == "level2": 
-        injected_flaw = "vagueness" 
+    elif raw_mode == "all_flaws":    # <--- NEW: Handle "ALL_FLAWS" explicitly
+        injected_flaw = "all_flaws"
     elif raw_mode in ["vagueness", "timeframe", "relevance"]: 
         injected_flaw = raw_mode    
     else: 
-        injected_flaw = "vagueness" 
+        # Fallback (handles "level2" if you switch back to old labels)
+        injected_flaw = "vagueness"
+    # ------------------------------------------------------------------ 
 
     detected_flaw = "none"
     if missing_list: detected_flaw = missing_list[0] 
@@ -953,7 +955,8 @@ def navigation_node(state: AgentState):
         "nav_instruction": final_instruction, 
         "agent_thoughts": state["agent_thoughts"] + [thought],
         "items_evidence": items_data,
-        "followup_count": new_followup_count 
+        "followup_count": new_followup_count,
+        "analytics_records": current_analytics
     }
 
 # 6. Transition Node (FIXED: Properly loads next item)
