@@ -38,55 +38,52 @@ OUTPUT_CSV_FOLDER.mkdir(parents=True, exist_ok=True)
 # =========================
 PROFILE_SCHEMA = {
   "client_id": "",
+
+  # DOMAIN 1: IDENTITY
   "persona": {
     "demographics": {
       "age": None,
-      "gender": None
-    },
-    # In PROFILE_SCHEMA
-    "interaction_style": {
-      "style_label": "",          # short, human-readable summary phrase (e.g., "brief and hesitant", "open and detailed")
-      "scores": {                 # 0–4 anchored rubric (0 = very low, 4 = very high intensity of the trait)
-        "verbosity": 0,           # Average length and elaboration of turns (0 = one-word or terse replies; 2 = medium sentences with some detail; 4 = long, descriptive responses with narrative flow or multiple clauses
-        "hedging": 0,             # Frequency of uncertainty or softening phrases (“maybe”, “I guess”, “kind of”, “probably”); 0 = none or rare; 2 = occasional hedges; 4 = very frequent use showing hesitation or avoidance
-        "directness": 0,          # Degree of clarity and explicitness in responses; 0 = vague, ambiguous, or noncommittal answers; 2 = reasonably clear but sometimes roundabout; 4 = fully explicit, concrete, and direct statements with minimal ambiguity.
-        "cooperation": 0,         # Willingness to engage with and assist the interviewer (psychologist); 0 = resistant, dismissive, or refuses to answer; 2 = compliant but minimally engaged; 4 = actively helpful, clarifies questions, elaborates willingly.
-        "responsiveness": 0,      # How well the participant stays on-topic and addresses what was asked. 0 = frequently off-topic, ignores prompts; 2 = sometimes indirect; 4 = consistently relevant and responsive to each question.
-        "avoidance": 0,           # Degree of topic deflection or minimization of sensitive areas. 0 = fully open, no avoidance; 2 = mild deflection when uncomfortable topics arise;4 = frequent redirection, denial, or changing subject when asked about emotions, family, etc.
-        "self_disclosure": 0,     # Willingness to share personal experiences, feelings, or examples. 0 = impersonal or purely factual speech; 2 = partial disclosure (mentions feelings briefly);4 = rich personal narratives and emotional introspection.
-        "formality": 0            # Language tone: formal vs. casual/slang style. 0 = highly informal, colloquial, or slang-filled; 2 = conversational but appropriate; 4 = very formal, clinical, or academic phrasing.
-      },
-      "features": {
-        "avg_sentence_length_estimate": 0,
-        "hedging_markers": [],     # ["maybe","I guess",...]
-        "discourse_markers": [],   # ["well","so","like","you know",...]
-        "fillers": [],             # ["um","uh","err",...]
-        "emotional_tone": ""       # "negative"|"neutral"|"positive"|"mixed"
-      },
-      "evidence_quotes": []        # 1–3 short USER snippets
+      "gender": ""
     }
   },
-  "clinical_signals": {
-    "symptoms": {
-      "anhedonia (loss of interest/pleasure)": {"present":"", "severity_hint":"", "evidence_quotes":[]},
-      "low mood / hopelessness":               {"present":"", "severity_hint":"", "evidence_quotes":[]},
-      "sleep disturbance":                     {"present":"", "severity_hint":"", "evidence_quotes":[]},
-      "fatigue / low energy":                  {"present":"", "severity_hint":"", "evidence_quotes":[]},
-      "appetite/weight change":                {"present":"", "severity_hint":"", "evidence_quotes":[]},
-      "self-worth/guilt":                      {"present":"", "severity_hint":"", "evidence_quotes":[]},
-      "concentration problems":                {"present":"", "severity_hint":"", "evidence_quotes":[]},
-      "psychomotor change (slowing or agitation)": {"present":"", "severity_hint":"", "evidence_quotes":[]}
-    }
+  # DOMAIN 2: MEDICAL EVIDENCE ([CATEGORY](Present/Absent/Uncertain))
+  "Symptom": {
+    "symptom_evidence": ""
   },
-  # New section (filled after aggregation via extra LLM call)
-  "behavioral_features": {
-    "affective_emotional": {},
-    "interactional_behavior": {},
-    "cognitive_linguistic": {},
-    "social_context": {},
-    "self_perception_insight": {},
-    "time_alignment": {}
-  }
+  # DOMAIN 3: AFFECT [Categorization](e.g., Flat, Agitated, Neutral)
+  "Affective_Tone": {
+    "label": ""
+  },
+  # DOMAIN 4: EMOTION [Categorization](e.g., Shame, Guilt, Anger)
+  "Dominant_Emotion": {
+    "label": ""
+  },
+  # DOMAIN 5: BEHAVIOR [Text-Based]
+  "Behavioral": {
+    "description": ""
+  },
+  # DOMAIN 6: COGNITIVE PATTERNS [Text-Based]
+  "Cognitive_Patterns": {
+    "description": ""
+  },
+  # DOMAIN 7: CORE BELIEFS [Text-Based]
+  "Core_Beliefs": {
+    "label": ""
+  },
+  # DOMAIN 8: INTERMEDIATE BELIEFS [Text-Based]
+  "Intermediate_Beliefs": {
+    "rules_and_assumptions": ""
+   },
+  # DOMAIN 8: SOCIAL CONTEXT [Text-Based]
+  "Relational_Context": {
+    "description": ""
+  },
+  # DOMAIN 9: INTERACTION STYLE [Categorization]
+  "Response_Style": {
+    "label": ""
+  },
+  # DOMAIN 10: MEDICAL ENGINE (Hidden/Separate)
+  "clinical_signals": { "symptoms": {} }
 }
 
 PHQ8_CATEGORY_GUIDE = """
@@ -133,13 +130,6 @@ If evidence is limited or mixed, choose the lower level or "uncertain."
     * May include helpless tone, inability to function, or strong negative emotion.
     * Linguistic cues: "every day", "can’t", "completely", "no energy at all", "I’ve stopped", "nothing helps".
     → Example: "Every day I feel exhausted and can barely get out of bed."
-
-- uncertain:
-    * Evidence is ambiguous, conflicting, or too brief to judge.
-    * May describe the symptom but without clear frequency or impact.
-    * Use when participant’s statement could reflect normal variation or when context is missing.
-    * Linguistic cues: vague or contradictory phrasing ("maybe", "not sure", "I guess", "depends").
-    → Example: "I guess I get tired sometimes, but I’m not sure if that counts."
 
 PHQ-8 DOMAINS (DETAILED RUBRIC):
 
@@ -332,237 +322,92 @@ REQUIRED_SYMPTOMS = [
 # 1b) Interaction style guide
 # =========================
 STYLE_GUIDE = """
-INTERACTION STYLE — PRINCIPLE-BASED GUIDE
-You will rate the participant’s conversational style from a transcript SLICE (USER lines only).
-Interpret meaning and interactional behavior from the USER’s wording, not just keywords.
-Return JSON only using the provided schema; do not add or remove fields.
+CLINICAL BEHAVIOR & STYLE GUIDE
+Pick ONLY from these allowed labels. DO NOT use numbers.
 
-GOAL
-Characterize how the person tends to speak in this slice (their conversational “signature”): brevity vs. verbosity,
-direct vs. hedged, cooperative vs. resistant, etc. Use contextual judgment instead of rigid rules.
-
-SCALE (0–4) — USE RELATIVELY, NOT MECHANICALLY
-0 = none/absent  •  1 = low  •  2 = moderate/typical  •  3 = high  •  4 = very high/intense
-Most slices should center near 2, with some 0–1 and some 3–4. Avoid collapsing everything to 0–1.
-
-STYLE LABEL (very important for entailment)
-Set "style_label" to a compact summary with 2–3 salient traits in order of prominence, e.g.:
-"terse, cooperative, somewhat hedging" or "verbose, direct, informal".
-Do NOT just restate scores; synthesize a human-readable label.
-
-WHAT TO SCORE (0–4 each)
-- Verbosity: brevity vs. length/detail across turns.
-- Hedging: uncertainty/softeners (e.g., maybe, kind of, I think, I guess, not sure, tends to, probably).
-- Directness: clarity and explicitness of answers vs. ambiguity/evasion.
-- Cooperation: willingness to answer, clarify, and work with the interviewer (not agreement, but engagement).
-- Responsiveness: relevance and on-target replies to prompts.
-- Avoidance: topic deflection, changing subject, refusing specifics.
-- Self-disclosure: concreteness and personal detail (events, feelings, examples).
-- Formality: formality of register (clinical/structured vs. slang/casual).
-
-FEATURE EXTRACTION (populate features consistently)
-- avg_sentence_length_estimate: approximate average words per sentence (round int; consider multiple turns).
-- hedging_markers: list up to ~6 distinct hedges actually used in the slice.
-  Expand beyond literal matches: detect paraphrased hedges like "sorta/kinda", "I feel like", "I guess so", "probably not",
-  "I’m not sure", "maybe", "I think", "to be honest", "more or less", "not really", "I suppose".
-- discourse_markers: list items like "well", "so", "like", "you know", "honestly", "to be fair", "anyway".
-- fillers: short non-lexical items like "um", "uh", "erm", "hmm".
-- emotional_tone: negative|neutral|positive|mixed — overall affect of the slice, not diagnosis.
-
-EVIDENCE QUOTES
-Add 1–3 short verbatim snippets (≤18 words) that best illustrate the style (e.g., hedging, terseness, disclosure).
-
-PRINCIPLES FOR DECISION-MAKING
-- Prefer interpretation over keyword counting. Consider consistency across turns.
-- A single strong instance can move a score from 1→2; repeated patterns can justify 3–4.
-- If directness is high and hedging is low, reflect that asymmetry (don’t keep everything near 2).
-- Off-topic or evasive answers should lower responsiveness and raise avoidance.
-- If the slice is short but consistently terse, set verbosity low (0–1) rather than defaulting to 2.
-
-CALIBRATION HINTS
-- Verbosity anchor: ~≤6 words/turn repeatedly → 0–1; multi-sentence with details → 3–4.
-- Hedging anchor: occasional hedge → 1–2; frequent across turns → 3–4.
-- Directness anchor: clear, specific answers to asked question → 3–4; vague or deflecting → 0–1.
-- Self-disclosure anchor: impersonal generalities → 0–1; concrete events/feelings/examples → 3–4.
-- Formality anchor: heavy slang/fillers → 0–1; clinical/structured phrasing → 3–4.
-
-OUTPUT SHAPE FOR THE SLICE (must match exactly)
-{
-  "style": {
-    "style_label": "",
-    "scores": {
-      "verbosity": 0, "hedging": 0, "directness": 0, "cooperation": 0,
-      "responsiveness": 0, "avoidance": 0, "self_disclosure": 0, "formality": 0
-    },
-    "features": {
-      "avg_sentence_length_estimate": 0,
-      "hedging_markers": [],
-      "discourse_markers": [],
-      "fillers": [],
-      "emotional_tone": "negative|neutral|positive|mixed"
-    },
-    "evidence_quotes": []
-  }
-}
-
-FEW-SHOT CALIBRATION EXAMPLES (do not imitate wording; match intent)
-Example A (terse + direct, low hedge, informal)
-→ style_label: "terse, direct, informal"
-→ scores: verbosity=1, hedging=0–1, directness=3, cooperation=2, responsiveness=3, avoidance=1, self_disclosure=1, formality=1
-→ features: avg_sentence_length_estimate≈6; hedging_markers=[]; discourse_markers=["yeah","so"]; fillers=["uh"]; emotional_tone="neutral"
-→ evidence_quotes: ["Yeah, I did. It was fine.", "Uh, just work stuff."]
-
-Example B (verbose + hedging + cooperative)
-→ style_label: "verbose, cooperative, somewhat hedging"
-→ scores: verbosity=3–4, hedging=2–3, directness=2, cooperation=3, responsiveness=3, avoidance=1, self_disclosure=3, formality=2
-→ features: avg_sentence_length_estimate≈18; hedging_markers=["I think","maybe","kind of"]; discourse_markers=["well","you know"]; fillers=[]
-→ evidence_quotes: ["Well, I think it was kind of tough to keep up."]
-
-Example C (avoidant + low disclosure)
-→ style_label: "avoidant, low disclosure, indirect"
-→ scores: verbosity=1, hedging=2, directness=1, cooperation=1, responsiveness=1, avoidance=3–4, self_disclosure=0–1, formality=2
-→ features: avg_sentence_length_estimate≈7; hedging_markers=["not really","I guess"]; discourse_markers=["so"]; fillers=[]
-→ evidence_quotes: ["I don’t really want to get into that."]
+1) symptom_evidence: [Present | Absent | Uncertain]
+2) affective_tone: [Flat | Dysphoric | Agitated | Neutral]
+3) emotions: [Anxious | Sad | Anger | Hurt | Disappointed | Ashamed | Guilty | Suspicious | Jealous]
+4) behavioral: [1 to 2 Sentence]
+5) cognitive_patterns: [1 to 2 Sentence]
+6) core_beliefs: [Helpless | Unloveable | Worthless | None]
+7) intermediate_belief: [1 to 2 Sentence]
+8) relational_context: [1 to 2 Sentence]
+9) response_style: [Verbose | Terse | Evasive | Cooperative]
 """
 
 # =========================
 # 1c) Extra feature extraction guide & schema (new)
 # =========================
 EXTRA_FEATURES_GUIDE = """
-**CRITICAL INSTRUCTION:** For every field with a "reasoning" key, you MUST provide a 1-sentence justification for why you chose that score *before* you output the score.
-Your reasoning must reference specific behaviors (e.g., "User consistently deflected questions about family").
-**Do not infer.** Only assign High (3-4) or Low (0-1) scores if there is EXPLICIT textual evidence. If ambiguous, stick to Moderate (2).
+Extract features using these strict definitions. Pick ONLY one option for TAGS.
 
----
+--- GROUP 1: SYMPTOM OPTION ---
+1. symptom_evidence: [TAG]
+   - Present: Clear evidence of depression symptoms.
+   - Absent: Explicit denial or no evidence of symptoms.
+   - Uncertain: Vague or conflicting evidence.
 
-### 1) Affective / Emotional
-Purpose: Capture the emotional quality of the client’s language.
+--- GROUP 2: INTERACTION STYLE OPTION ---
+2. affective_tone: [TAG]
+   - Flat: Monotone, lack of emotional expression.
+   - Dysphoric: Sad, hopeless, or heavy mood.
+   - Agitated: Restless, irritable, or high-tension.
+   - Neutral: Typical, calm conversation.
 
-- **overall_tone**: 
-    * Label: "Negative", "Positive", or "Neutral".
-    * REASONING: Cite specific emotional keywords (e.g., "sad," "hopeless," "great").
-- **variability**:
-    * **STRICT RULE:** Only score High (3-4) if the user *explicitly describes* their mood as "up and down," "moody," or "unstable."
-    * If they do not explicitly say they are moody, score as "Stable" (1-2).
-- **expressiveness**:
-    * High (3-4): Uses complex emotional words ("devastated", "ecstatic", "anxious").
-    * Low (0-1): Uses basic/numb words ("fine", "okay", "bad", "good").
+3. emotions: [TAG]
+   - Anxious: Worried, tense, or focused on future uncertainties/threats.
+   - Sad: Expressions of sorrow, grief, or low mood.
+   - Angry: Frustration, resentment, or hostility toward self or others.
+   - Hurt: Feeling emotionally wounded, let down, or rejected by others.
+   - Disappointed: Unmet expectations or a sense of loss regarding a specific outcome.
+   - Ashamed: Feeling "bad" as a person; a focus on being flawed or disgraced.
+   - Guilty: Focused on a specific action or "wrongdoing" that harmed others.
+   - Suspicious: Distrustful, wary of others' motives, or feeling watched/targeted.
+   - Jealous: Resentment toward others for their perceived advantages or relationships.
 
-### 2) Interactional Behavior
-Purpose: Analyze conversational dynamics and engagement.
+4. response_style: [TAG]
+   - Verbose: Over-explaining, very long answers.
+   - Terse: Minimalist, "Yes/No" or very short answers.
+   - Evasive: Avoiding the question or changing the topic.
+   - Cooperative: Balanced, helpful, and direct answers.
 
-- **responsiveness**: 
-    * High (4): Elaborates voluntarily; answers are paragraphs, not just sentences.
-    * Low (0-1): One-word answers ("Yes", "No", "Maybe"). Requires prompting to speak.
-- **engagement_trajectory**: 
-    * Increasing (3-4): Starts short, gets longer/deeper by the end.
-    * Decreasing (0-1): Starts chatting, then shuts down.
-    * Stable (2): Consistent length throughout.
-- **clarification_responsiveness**:
-    * High (4): Explicitly tries to help the listener understand ("I mean...", "In other words...").
-- **repair_frequency**:
-    * High (4): Frequently self-corrects ("Actually, no...", "I meant to say...").
-    * Low (0): Speaks without correcting themselves.
+--- GROUP 3: CORE BELIEFS (NEW) ---
+5. core_beliefs: [TAG]
+   - Helpless: Pick this if the user describes a lack of agency, feeling trapped, or believing that personal effort is futile in changing their situation.
+   - Unlovable: Pick this if the user describes a fundamental flaw in their ability to be liked or belong, focusing on social rejection, isolation, or being "different" from others.
+   - Worthless: Pick this if the user describes themselves as fundamentally deficient, a "moral" failure, or undeserving of basic respect and success.
+   - None: Pick this if no deep-seated negative identity belief is expressed in the transcript.
 
-### 3) Cognitive / Linguistic
-Purpose: Detect specific thinking patterns and language abstractness.
-
-- **temporal_focus**: 
-    * Estimate the ratio of Past (memories) vs. Present (current state) vs. Future (plans).
-- **cognitive_distortions**: 
-    * List SPECIFIC distortions found: "Catastrophizing" (expecting disaster), "All-or-Nothing" (words like *always*, *never*, *everyone*), "Personalization" (blaming self).
-- **pronoun_usage_analysis**: 
-    * Focus: Does the user say "I/Me" (Self-focus) or "They/We" (External focus)?
-- **vocabulary_richness**: 
-    * High (4): Uses academic, precise, or varied vocabulary.
-    * Low (0-1): Repetitive, simple vocabulary.
-- **abstractness**: 
-    * Abstract (4): Discusses concepts (justice, love, meaning, future, failure).
-    * Concrete (0-1): Discusses objects/logistics (food, sleep, bus, schedule).
-
-### 4) Social & Contextual
-Purpose: Map the explicit social world mentioned by the user.
-
-- **mentions**: 
-    * Set to TRUE only if specific people/topics are named (e.g., "My mom," "School," "My boyfriend").
-- **support_seeking**: 
-    * Active (4): User explicitly describes asking for help ("I called my friend," "I went to a doctor").
-    * None (0): User explicitly says they handle things alone ("I keep it to myself").
-- **relationship_conflict**: 
-    * Present (4): Explicit mention of fighting, arguing, or tension with others.
-    * None (0): Explicit statement of good relationships or no mention of others.
-- **avoidance_triggers**: 
-    * List topics the user explicitly refused to discuss or gave short, defensive answers to.
-
-### 5) Self-Perception & Insight
-Purpose: Determine if the user views themselves as an active agent or passive victim.
-
-- **insight_level**: 
-    * High (4): Explicitly links past behaviors to current outcomes ("I realize I was doing X because Y").
-    * Low (0-1): Describes events without reflecting on *why* they happened.
-- **agency (Locus of Control)**: 
-    * Active (4): Uses active verbs ("I decided," "I chose").
-    * Passive (0-1): Uses passive voice ("It happened to me," "They made me").
-- **self_esteem_tone**: 
-    * Negative (0-1): Explicit self-criticism ("I am a failure," "I'm useless").
-    * Positive (3-4): Explicit self-praise ("I'm good at this").
-
-### 6) Temporal Alignment
-Purpose: Check if the user sticks to the "last two weeks" constraint.
-
-- **status**: 
-    * "aligned" (Mentions "last week," "yesterday").
-    * "habitual" (Uses "always," "usually," "often" - implies long-term patterns).
-    * "mixed" (Both).
-- **corrected_after_prompt**: 
-    * Set true ONLY if the user says "Oh right, the last two weeks" or similar.
+--- GROUP 4: CLINICAL TEXT BASE SENTENCES ---
+6. behavioral: [1 to 2 Sentence] Describe physical/verbal habits (e.g., fillers, sighing, rate of speech).
+    - Definition: Physical or verbal actions observed during the interaction.
+    - Clinical Goal: Identify non-content cues like speech rate, pauses, or sighing.
+    - Example: "The user speaks in a low, monotone voice with frequent long pauses and audible sighing before answering."
+7. cognitive_patterns: [1 to 2Sentence] Describe thinking errors (e.g., "I always fail").
+    - Definition: Recurring "Thinking Errors" or cognitive distortions.
+    - Clinical Goal: Identify habits like catastrophizing, all-or-nothing thinking, or overgeneralization.
+    - Example: "Client exhibits overgeneralization by stating that one minor work mistake means their entire career is over."
+8. relational_context: [1 to 2 Sentence] Social support vs. conflict summary.
+    - Definition: The user's current social environment and interpersonal dynamics.
+    - Clinical Goal: Summarize the presence of social support versus active conflict.
+    - Example: "Describes a strong emotional bond with their spouse but reports total estrangement from their parents."
+9. intermediate_belief: [[1 to 2 Sentence]]
+    - Definition: The "Rules for Living" that the user uses to cope with their core belief. 
+    - Clinical Goal: Identify the "If/Then" assumptions or "Must/Should" rules.
+    - Example: "If I don't please everyone, then they will see I am worthless" or "I must never show weakness."
 """
 
 EXTRA_FEATURES_SCHEMA = {
-  "affective_emotional": {
-    "overall_tone": {"reasoning": "", "label": "", "score": 0},
-    "variability": {"reasoning": "", "label": "", "score": 0},
-    "expressiveness": {"reasoning": "", "label": "", "score": 0},
-    "evidence_quotes": []
-  },
-  "interactional_behavior": {
-    "responsiveness": {"reasoning": "", "label": "", "score": 0},
-    "engagement_trajectory": {"reasoning": "", "label": "", "score": 0},
-    "clarification_responsiveness": {"reasoning": "", "label": "", "score": 0},
-    "repair_frequency": {"reasoning": "", "label": "", "score": 0},
-    "evidence_quotes": []
-  },
-  "cognitive_linguistic": {
-    "temporal_focus": {"past": 0.0, "present": 0.0, "future": 0.0},
-    "cognitive_distortions": [], 
-    "pronoun_usage_analysis": {"reasoning": "", "label": "", "score": 0}, 
-    "vocabulary_richness": {"reasoning": "", "label": "", "score": 0},    
-    "abstractness": {"reasoning": "", "label": "", "score": 0},
-    "evidence_quotes": []
-  },
-  "social_context": {
-    "mentions": {
-      "family": False, "friends": False, "school_work": False,
-      "relationships": False, "finances": False, "health": False
-    },
-    "support_seeking": {"reasoning": "", "label": "", "score": 0},
-    "relationship_conflict": {"reasoning": "", "label": "", "score": 0},
-    "avoidance_triggers": [],
-    "environmental_stressors": [],
-    "evidence_quotes": []
-  },
-  "self_perception_insight": {
-    "insight_level": {"reasoning": "", "label": "", "score": 0},
-    "agency": {"reasoning": "", "label": "", "score": 0},
-    "self_esteem_tone": {"reasoning": "", "label": "", "score": 0},
-    "evidence_quotes": []
-  },
-  "time_alignment": {
-    "reasoning": "",
-    "status": "",
-    "corrected_after_prompt": False,
-    "evidence_quotes": []
-  }
+  "symptom_evidence": "",    # Categorization
+  "affective_tone": "",      # Categorization
+  "emotions": "",   # Categorization
+  "behavioral": "", # Text-Based (Sentence)
+  "cognitive_patterns": "",  # Text-Based (Sentence)
+  "core_beliefs": "",        # Categorization
+  "intermediate_belief": "", # Text-Based (Sentence)
+  "relational_context": "",  # Text-Based (Sentence)
+  "response_style": ""      # Categorization
 }
 
 # =========================
@@ -599,6 +444,7 @@ def llm_json(system: str, user: str, temperature: float = TEMPERATURE) -> dict:
 # =========================
 CHUNK_SYSTEM = "You are extracting PHQ-8 symptom evidence and interaction style from patient speech. Return JSON only."
 
+# THIS IS THE FLAT TEMPLATE FOR THE SLICES
 PHQ8_JSON_TEMPLATE_FOR_SLICE = {
   "symptoms": {
     "anhedonia (loss of interest/pleasure)": {"present":"", "severity_hint":"", "evidence_quotes":[]},
@@ -610,21 +456,14 @@ PHQ8_JSON_TEMPLATE_FOR_SLICE = {
     "concentration problems":                {"present":"", "severity_hint":"", "evidence_quotes":[]},
     "psychomotor change (slowing or agitation)": {"present":"", "severity_hint":"", "evidence_quotes":[]}
   },
-  "style": {
-    "style_label": "",
-    "scores": {
-      "verbosity": 0, "hedging": 0, "directness": 0, "cooperation": 0,
-      "responsiveness": 0, "avoidance": 0, "self_disclosure": 0, "formality": 0
-    },
-    "features": {
-      "avg_sentence_length_estimate": 0,
-      "hedging_markers": [],
-      "discourse_markers": [],
-      "fillers": [],
-      "emotional_tone": ""
-    },
-    "evidence_quotes":[]
-  }
+  "symptom_evidence": "",
+  "affective_tone": "",
+  "emotions": "",
+  "behavioral": "",
+  "cognitive_patterns": "",
+  "core_beliefs": "",
+  "relational_context": "",
+  "response_style": ""
 }
 
 CHUNK_USER_TMPL = """\
@@ -637,52 +476,53 @@ TRANSCRIPT SLICE (USER lines only):
 {slice_text}
 >>>
 
-FILL THIS JSON (no extra keys, no commentary):
+FILL THIS JSON (no extra keys, no commentary, NO SUB-FIELDS):
 {json_template}
 """
 
+EXTRA_SYSTEM = "You extract higher-level behavioral features from USER-only text for a client simulator. Return JSON only."
+
 AGG_SYSTEM = "You combine slice-level JSON into a single conservative PHQ-8 profile. Return JSON only."
 
+# THIS WAS THE MISSING PIECE
 AGG_USER_TMPL = """\
-Combine the slice JSON array below into ONE final profile.
+Combine the slice JSON array below into ONE final profile following the 8 Core Pillars.
 
-CRITICAL AGGREGATION RULES (Do not use simple math averaging):
-
-1. **PEAK DETECTION (Symptoms & Behaviors)**:
-   - If a symptom or behavior scores High (3-4) or 'Severe' in ANY slice, that is a critical signal.
-   - **Do not dilute strong signals.** - Example: If 'Avoidance' is [0, 0, 4, 1], the final score must be **High (3 or 4)** because the avoidance *did happen*.
-
-2. **AFFECTIVE CONSISTENCY**:
-   - If the user masks (says "I'm fine") but later reveals sadness, prioritize the **revealed sadness** for the 'overall_tone' label, but note the masking in the reasoning.
-
-3. **SYMPTOM EVIDENCE**:
-   - Only mark "present" if you have a verbatim quote. If the quote is weak, mark "uncertain".
-   - Use the HIGHEST severity found in any slice.
+CRITICAL AGGREGATION RULES:
+1. **SYMPTOM TRUTH**: Use the HIGHEST severity found in any slice. If a symptom is 'Present' in any slice, it is 'Present' overall.
+2. **PILLAR CONSISTENCY**: 
+   - Tags (Tone, Emotions, Style): Choose the most representative label.
+   - Sentences (Behavior, Thinking, Beliefs, Social): Merge findings into one strong, clear sentence.
+3. **CORE BELIEFS**: Prioritize the deepest internal "truth" revealed by the user across all slices.
 
 SLICES (array):
 <<<
 {slice_json_array}
 >>>
 
-OUTPUT: Fill this exact schema; do not add or remove keys.
-Replace client_id with "{client_id}". Leave demographics null if unknown.
-
+OUTPUT: Fill this exact flat schema. Replace client_id with "{client_id}".
 SCHEMA:
 {schema}
 """
 
-# New: extra-features prompt (single pass over concatenated USER text)
-EXTRA_SYSTEM = "You extract higher-level behavioral features from USER-only text for a client simulator. Return JSON only."
-
+# THE FINAL PASS TEMPLATE (FOR THE 8 CORE PILLARS)
 EXTRA_USER_TMPL = """\
 {guide}
 
-USER LINES (concatenated excerpts; may be long):
+INSTRUCTIONS:
+1. Look at the entire transcript below.
+2. Fill the JSON schema exactly as provided.
+3. DO NOT use sub-folders.
+4. DO NOT use numbers.
+5. For 'behavior', 'thinking', 'beliefs', and 'social': Write ONE clear sentence.
+6. For 'symptoms', 'tone', 'emotions', and 'style': Write ONE word.
+
+USER TRANSCRIPT:
 <<<
 {user_text}
 >>>
 
-Fill this JSON exactly (no extra keys):
+FILL THIS JSON (no extra keys, no commentary):
 {schema}
 """
 
@@ -797,12 +637,19 @@ def chunk_texts(lines: list[str], max_chars: int = 8000) -> list[str]:
     return chunks
 
 def validate_profile(profile: dict):
-    assert "client_id" in profile, "missing client_id"
-    assert "persona" in profile and "interaction_style" in profile["persona"], "missing persona.interaction_style"
-    sx = profile.get("clinical_signals", {}).get("symptoms", {})
-    for k in REQUIRED_SYMPTOMS:
-        assert k in sx, f"missing symptom: {k}"
-        assert "present" in sx[k] and "severity_hint" in sx[k] and "evidence_quotes" in sx[k], f"missing fields in {k}"
+    # 1. Check top-level Domain Boxes exist
+    assert "persona" in profile, "Missing Persona domain"
+    assert "Symptom" in profile, "Missing Symptom domain"
+    assert "Core_Beliefs" in profile, "Missing Core_Beliefs domain"
+    
+    # 2. Check internal Identity
+    assert "demographics" in profile["persona"], "Missing demographics inside persona"
+    
+    # 3. Check specific clinical content
+    # We check if the 'description' or 'label' keys exist in their new boxes
+    assert "symptom_evidence" in profile["Symptom"], "Missing symptom_evidence in Symptom box"
+    assert "description" in profile["Core_Beliefs"], "Missing description in Core_Beliefs box"
+    assert "description" in profile["Behavioral"], "Missing description in Behavior box"
 
 def save_outputs(profile: dict, participant_id: int):
     # JSON
@@ -832,83 +679,78 @@ def save_outputs(profile: dict, participant_id: int):
 # 5) Main pipeline
 # =========================
 def analyze_participant(participant_id):
-    # Load data
+    # 1. Load data
     tpath = TRANSCRIPT_FILE_TPL.format(pid=participant_id)
     df = read_transcript_csv(tpath)
-
-    # 👇 No override anymore — just auto-detect USER
     user_lines = get_user_utterances(df)
+    
     if not user_lines:
-        raise ValueError("No USER utterances found in transcript.")
+        raise ValueError("No USER utterances found.")
 
-    # Chunking for PHQ-8 + style
+    # 2. Extract PHQ-8 Slices (The medical engine)
     chunks = chunk_texts(user_lines, max_chars=8000)
-    if len(chunks) > 6:
-        head = chunks[:3]
-        tail = chunks[3:]
-        random.seed(42)
-        chunks = head + random.sample(tail, k=min(5, len(tail)))  # keep variety, control cost
-
-    # Per-chunk LLM extraction
     slice_results = []
-    for slc in chunks:
+    for slc in chunks[:6]:
         user_prompt = CHUNK_USER_TMPL.format(
             phq8_guide=PHQ8_CATEGORY_GUIDE,
             style_guide=STYLE_GUIDE,
             slice_text=slc,
-            json_template=json.dumps(PHQ8_JSON_TEMPLATE_FOR_SLICE, ensure_ascii=False, indent=2)
+            json_template=json.dumps(PHQ8_JSON_TEMPLATE_FOR_SLICE)
         )
-        out = llm_json(CHUNK_SYSTEM, user_prompt)
-        slice_results.append(out)
+        slice_results.append(llm_json(CHUNK_SYSTEM, user_prompt))
 
-    # Aggregate → final profile (symptoms + style)
-    schema_for_prompt = json.dumps(PROFILE_SCHEMA, ensure_ascii=False, indent=2)
-    agg_user = AGG_USER_TMPL.format(
-        slice_json_array=json.dumps(slice_results, ensure_ascii=False, indent=2),
-        client_id=str(participant_id),
-        schema=schema_for_prompt
-    )
-    final_profile = llm_json(AGG_SYSTEM, agg_user)
-
-    # Inject demographics if available
+    # 3. Get Demographics from the CSV
+    age, gender = None, None
     if os.path.exists(DAIC_TABLE_CSV):
         meta = pd.read_csv(DAIC_TABLE_CSV)
-        if "participant_id" in meta.columns:
-            row = meta.loc[meta["participant_id"] == participant_id]
-            if not row.empty:
-                r = row.iloc[0].to_dict()
-                age = None
-                gender = None
-                if "age" in r and pd.notna(r["age"]):
-                    try: age = int(r["age"])
-                    except: age = None
-                if "gender" in r and pd.notna(r["gender"]):
-                    gender = str(r["gender"])
-                final_profile.setdefault("persona", {}).setdefault("demographics", {})
-                final_profile["persona"]["demographics"]["age"] = age
-                final_profile["persona"]["demographics"]["gender"] = gender
+        row = meta.loc[meta["participant_id"] == participant_id]
+        if not row.empty:
+            raw_age = row.iloc[0].get("age")
+            raw_gender = row.iloc[0].get("gender")
+            
+            # FORCE CONVERSION: Convert from numpy/pandas types to native Python types
+            if pd.notna(raw_age):
+                age = int(raw_age) 
+            if pd.notna(raw_gender):
+                gender = str(raw_gender)
 
-    # Ensure client_id set
-    final_profile["client_id"] = str(participant_id)
-
-    # ---------- Extra behavioral features ----------
-    joined = ""
-    for u in user_lines:
-        if len(joined) + len(u) + 1 > 12000:
-            break
-        joined += (u + "\n")
-
-    extra_user = EXTRA_USER_TMPL.format(
+    # 4. Get the 8 Pillars from the LLM (The interaction style)
+    user_text_for_llm = "\n".join(user_lines)[:12000] 
+    extra_user_prompt = EXTRA_USER_TMPL.format(
         guide=EXTRA_FEATURES_GUIDE,
-        user_text=joined.strip(),
-        schema=json.dumps(EXTRA_FEATURES_SCHEMA, ensure_ascii=False, indent=2)
+        user_text=user_text_for_llm,
+        schema=json.dumps(EXTRA_FEATURES_SCHEMA)
     )
-    extra_features = llm_json(EXTRA_SYSTEM, extra_user)
+    extra_features = llm_json(EXTRA_SYSTEM, extra_user_prompt)
 
-    final_profile.setdefault("behavioral_features", {})
-    final_profile["behavioral_features"].update(extra_features)
+    # 5. BUILD THE 9 DOMAINS (THE BOXES)
+    final_profile = {
+        "client_id": str(participant_id),
+        
+        # DOMAIN 1: PERSONA
+        "persona": {
+            "demographics": {"age": age, "gender": gender}
+        },
 
-    # Validate shape (core)
+        # DOMAIN 2: SYMPTOM
+        "Symptom": {
+            "symptom_evidence": extra_features.get("symptom_evidence", "")
+        },
+
+        # DOMAINS 3-9: INDIVIDUAL BOXES
+        "Affective_Tone":        {"label": extra_features.get("affective_tone", "")},
+        "Dominant_Emotion":      {"label": extra_features.get("emotions", "")},
+        "Behavioral":            {"description": extra_features.get("behavioral", "")},
+        "Cognitive_Patterns":    {"description": extra_features.get("cognitive_patterns", "")},
+        "Core_Beliefs":          {"description": extra_features.get("core_beliefs", "")},
+        "Relational_Context":    {"description": extra_features.get("relational_context", "")},
+        "Response_Style":        {"label": extra_features.get("response_style", "")},
+        
+        # Keep internal signals for medical backing
+        "clinical_signals": {"symptoms": slice_results[-1].get("symptoms", {})}
+    }
+
+    print(f"--- Final Profile Built: Participant {participant_id} ---")
     validate_profile(final_profile)
     return final_profile
 
