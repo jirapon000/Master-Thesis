@@ -200,8 +200,30 @@ STEP 1: SIGNAL DETECTION
 - What explicit or implicit signals appear? Apply Severity Inference Rules.
 - Note any cross-item signals from earlier in the conversation.
 
-STEP 2: ALIGNMENT AUDIT
-- Does this conflict with anything said earlier? If yes → flag misalignment → FOLLOW_UP.
+STEP 2: ALIGNMENT AUDIT (Network Approach to Psychopathology)
+Symptoms are interconnected nodes. Use these rules to detect cross-item contradictions:
+
+**Type 1 - Physical Causality** (Sleep → Fatigue → Concentration):
+- Severe sleep deprivation is physically incompatible with "endless energy" or "perfect focus".
+- Low appetite/energy should correlate with fatigue reports.
+
+**Type 2 - Emotional Coherence** (Depression → Anhedonia → Self-Worth):
+- Claims of "complete hopelessness" contradict reports of high pleasure or social engagement.
+- Deep self-worth issues should align with depressed mood severity.
+
+**Type 3 - Behavioral/Cognitive Alignment** (Psychomotor → Concentration):
+- Extreme restlessness/pacing is incompatible with sustained focus or reading.
+- Psychomotor slowing should align with fatigue and low energy reports.
+
+**Type 4 - Consistent (Expected Correlation)**:
+- Fatigue → difficulty concentrating is expected and consistent.
+- Anhedonia → social withdrawal is expected and consistent.
+
+ALIGNMENT RULE:
+- If current answer CONTRADICTS a prior item using the above logic → set detected_missing_domain 
+  to "misalignment" and trigger FOLLOW_UP.
+- If current answer is CONSISTENT with prior items → note it and continue scoring.
+- If no prior items exist yet → skip this step.
 
 STEP 3: GAP ANALYSIS (selective)
 - Is it genuine ambiguity (off-topic, contradiction, explicit out-of-window)?
