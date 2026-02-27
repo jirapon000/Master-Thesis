@@ -21,7 +21,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 AI_NAME = "LLM Psychologist (Single Agent Baseline)"
 PARTICIPANT_NAME = "Participant"
 LLM_MODEL = "gpt-4o-mini"
-LLM_TEMPERATURE = 0.7
+LLM_TEMPERATURE = 0
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ================= DATA MAPPING =================
@@ -39,96 +39,185 @@ SHORT_KEYS = {
     "I1": "anhedonia", "I2": "depressed_mood", "I3": "sleep", "I4": "fatigue",
     "I5": "appetite", "I6": "self_worth", "I7": "concentration", "I8": "psychomotor"
 }
-# ================= PATIENT ROLEPLAY PROMPT =================
-patient_roleplay_template = ChatPromptTemplate.from_messages([
-    ("system", """You are a participant in a clinical interview.
-**STRICT ADHERENCE:** Stay in character at all times. Do not reveal you are an AI. If asked about your identity, you are the person described in the profile below.
 
-     
-**YOUR PROFILE (Ground Truth):**
+INTERNAL_DOMAINS = [
+    "Core_Beliefs",          # Deepest self-view
+    "Intermediate_Beliefs",  # Rules for living
+    "Emotion",               # What they feel
+    "Relational_Context"     # Friends/Family/Situation
+]
+
+EXTERNAL_DOMAINS = [
+    "Behavioral",            # Visible actions
+    "Symptom",               # Physical status (Sleep, Eating, etc.)
+    "Affective_Tone",        # Their emotional vibe
+    "Conversation_Style",    # How they express themselves
+    "Cognitive_Patterns",    # How they think
+    "demographics"           # Facts (Age, Gender)
+]
+
+# 2. QUESTION DOMAINS (For Mismatch Logic: Is the topic Internal or External?)
+PHQ8_QUESTION_MAPPING = {
+    # Internal Questions (Ask about feelings/thoughts)
+    "Anhedonia": "INTERNAL",
+    "Depressed mood": "INTERNAL",
+    "Self-worth": "INTERNAL",
+    "Concentration": "INTERNAL",
+    "Suicide": "INTERNAL",
+    
+    # External Questions (Ask about physical body/behavior)
+    "Sleep problems": "EXTERNAL",
+    "Fatigue": "EXTERNAL",
+    "Appetite change": "EXTERNAL",
+    "Psychomotor": "EXTERNAL",
+    
+    # Neutral
+    "Introduction": "NEUTRAL",
+    "Closing": "NEUTRAL"
+}
+# ================= PATIENT ROLEPLAY PROMPT =================
+participant_template = ChatPromptTemplate.from_messages([
+    ("system", """You ARE the participant described below.
+**ROLE:** You are a human patient in a clinical interview. Speak naturally in the first person ("I"). Stay in Character, DO NOT break character.
+**OBJECTIVE:** Engage in a conversation where your responses are informed by your internal thoughts, emotions, and core beliefs, just as a real person's would be.
+    
+**PARTICIPANT PROFILE (Internal State):**
 {profile_json}
 
-**SYMPTOM TRUTH:**
-Status: {symptom_status} 
-Severity: {severity}
+**CURRENT SCENARIO:**
+- **Interviewer Question:** "{question}"
 
-**RESPONSE RULES:**
-1. **Conversational Brevity:** Keep answers to 1-2 sentences. Avoid long monologues unless specifically asked to "tell a story."
-2. **Organic Flow:** Speak like a person, not a textbook
-3. **Implicit Disclosure:** Do not "volunteer" your symptoms or severity score.
-4. **Behavioral Integrity:** You MUST strictly follow the BEHAVIORAL CONSTRAINT below. This dictates your tone, eye contact (described through words), and level of cooperation.
+**COGNITIVE GUIDELINES (How to Think):**
+1. **Internalize the Profile:** Before answering, look at your "Cognitive_Patterns" and "Core_Beliefs" in the profile. Let these unseen thoughts color your tone.
+2. **Gradual Revelation:** Do not disclose your full "Cognitive Conceptualization" diagram directly. Instead, let it subtly inform your answers. Real patients often hesitate or speak indirectly before revealing deep pain.
+3. **Authenticity:** Use natural language including hesitations ("um...", "well..."), pauses, or emotional coloring if the topic is sensitive.
+     
+**RESPONSE GUIDELINES:**
+1. **Strict Domain Alignment (The "What"):** Map the question strictly to the symptom category:
+   - **Physical** (Sleep, Energy, Appetite): Describe physical sensations and frequency.
+   - **Affective** (Mood, Interest, Self-Worth): Express internal feelings and emotional state.
+   - **Cognitive/Behavioral** (Focus, Restlessness): Describe functional impact (e.g., "I can't read," "I pace around").
+2. **Psychological Grounding (The "Why"):** Do not just list symptoms. Connect them to your **Profile Context**:
+   - **Triggers:** If you have 'Relational Context' (e.g., girlfriend issues), mention it as a cause for your mood.
+   - **Thought Patterns:** Apply your 'Cognitive_Patterns' (e.g., if you 'overgeneralize', use words like "always", "never", "everyone").
+   - **Beliefs:** Let your 'Core_Beliefs' (e.g., "I am unlovable") bleed into your answers about self-worth.
+3. **Match Severity:** If your profile indicates "Severe" or "Frequent" issues, use strong, definitive language. Do not downplay it.
+4. **Suppress Politeness:** Do not default to "I'm okay" or "I guess so" if your profile indicates distinct distress. Be honest about negative feelings.
 
-**CRITICAL BEHAVIORAL CONSTRAINT:**
-{style_instruction}"""),
-    ("human", "{question_text}")
+**BEHAVIORAL INSTRUCTIONS:**
+1. **PRIMARY DIRECTIVE:** {special_instruction}
+2. Maintain Immersion: Never break character or mention being an AI.
+3. Length: Keep the response to 1-3 sentences (concise but descriptive).
+"""),
+    ("human", "Reply exactly as the participant:")
 ])
 # ================= PROMPTS =================
 intro_template = ChatPromptTemplate.from_messages([
     ("system", """You are a warm, empathetic licensed psychologist.
-Goal: Establish immediate professional rapport.
-- Greet the participant warmly.
-- Ask how they are doing today.
-- Constraint: Maximum 2 sentences. Avoid generic platitudes."""),
+Goal: Establish professional rapport.
+- Greet the participant by acknowledging their presence.
+- Ask a single open-ended question about their current wellbeing.
+- Style: Professional, grounded, and concise. 
+- Constraint: Maximum 2 sentences. No generic AI platitudes (e.g., 'I am here to help')."""),
     ("human", "Start the session.")
 ])
 
 rapport_template = ChatPromptTemplate.from_messages([
     ("system", """You are a licensed psychologist building trust.
 Goal: Validate the participant's response and maintain a supportive connection.
-- If positive: Reflect their energy.
-- If negative/stressed: Provide brief empathetic validation.
-- **CRITICAL:** Do NOT begin assessment. Do NOT provide clinical advice.
-- Constraint: Keep it brief and human-centric."""),
+- Acknowledge their specific emotion (positive or negative).
+- Provide a brief 'reflection' of what they said to show you are listening.
+- **CRITICAL:** Do NOT start the PHQ-8 items yet. Do NOT offer therapy/advice.
+- Constraint: 1-2 sentences maximum."""),
     ("human", "{last_response}")
 ])
 
 transition_template = ChatPromptTemplate.from_messages([
-    ("system", """You are a licensed psychologist transitioning from rapport-building to assessment.
-1. Briefly acknowledge the participant's last comment.
-2. State that you will now begin a standard assessment regarding their mood and health over the **last two weeks**.
-3. **MANDATORY:** Do NOT ask a question. End with a statement of readiness.
+    ("system", """You are a licensed psychologist transitioning to the PHQ-8 assessment.
+1. Acknowledge the participant's last comment.
+2. State: 'I’d like to ask you some specific questions about your health and mood over the last 2 weeks to get a better picture of how you've been feeling.'
+3. **MANDATORY:** End with a statement of readiness. Do NOT ask 'Are you ready?' or any other question.
 """),
     ("human", "The user just said: '{last_response}'. Generate the transition statement.")
 ])
 
 probe_template = ChatPromptTemplate.from_messages([
-    ("system", """You are a licensed psychologist conducting a clinical assessment.
-Your goal: Ask a supportive, open-ended question to assess '{item_label}'.
+    ("system", """You are a licensed psychologist conducting a PHQ-8 assessment.
+Your goal: Ask an open-ended question to evaluate '{item_label}'.
 Clinical Criteria: "{hypothesis_text}"
 
 Guidelines:
-1. **Timeframe:** You MUST anchor the question to the **last 2 weeks**.
-2. **Tone:** Be warm and conversational. Do not sound like a robotic survey.
-3. **Clarity:** Avoid complex medical jargon. Use simple, natural language.
-   - Example: Don't say "psychomotor retardation." Say "moving or speaking slowly."
-4. **Format:** Ask only ONE clear question."""),
+1. **Timeframe Anchor:** You MUST include the phrase 'over the last 2 weeks' in the question.
+2. **Open-Ended:** Avoid 'Yes/No' questions. Start with 'How has...', 'Tell me about...', or 'In what way...'.
+3. **Clinical Translation:** Use the '{hypothesis_text}' but translate it into everyday language. 
+   - *Example for Appetite:* 'How has your interest in food or your eating habits been lately?'
+4. **Format:** Only ask ONE question. No multi-part questions."""),
     ("human", "Generate the question.")
 ])
 
 # === STRICT PROMPT: ENSURES AGENT GIVES 0-3 ===
+# === IMPROVED SCORING PROMPT: FIXES ZERO-BIAS ===
 baseline_template = ChatPromptTemplate.from_messages([
     ("system", """You are a licensed psychologist conducting a PHQ-8 assessment.
 Current Item: {item_index}: "{item_label}" (Criteria: {hypothesis_text})
 
-TASK:
-1.  **Analyze Response:** Evaluate for clinical clarity and direct relevance.
-2.  **Identify Data Gaps (Missing Domains):**
-    * **Vagueness:** Ambiguous phrasing (e.g., "I guess," "sort of") or lack of symptom intensity.
-    * **Timeframe:** Reference to periods outside the mandatory **last 2 weeks**.
-    * **Relevance:** Non-sequiturs, subject changes, or dodging the specific symptom.
-3.  **Mandatory Scoring:** You must assign a definitive integer (0-3) regardless of clarity.
-    * 0: Not at all
-    * 1: Several days
-    * 2: More than half the days
-    * 3: Nearly every day
+**SCORING SCALE:**
+0 - [Not at all]: Explicitly denied, or zero signal in the patient's language.
+    - CRITICAL RULE: Do NOT assign 0 simply because the patient was vague.
+      Vagueness with distress language = at least 1. Zero requires active denial.
+
+1 - [Several days / 2-6 days]: Patient hints at the symptom or uses hedged language
+    ("sometimes", "a bit", "occasionally"), or describes mild/infrequent impact.
+    - DEFAULT here when evidence is present but frequency is unclear.
+
+2 - [More than half the days / 7-11 days]: Symptom is described as a persistent struggle.
+    Cues: "most days", "a lot", "hard to get through the day", "pretty often".
+
+3 - [Nearly every day / 12-14 days]: Symptom is pervasive and debilitating.
+    Cues: "always", "every day", "it never gets better", "constantly".
+
+**SEVERITY INFERENCE RULES (use when no explicit count is given):**
+- Catastrophizing / absolutist language ("never", "always", "nothing works") → score 2–3.
+- Clear emotional burden around the symptom ("it's been hard", sighing, "I don't know...") → score 1–2.
+- Explicit denial ("No, sleep is fine", "I eat normally") → score 0 regardless of mood.
+- Patient deflects or changes subject → NOT evidence of absence. Treat as vague → FOLLOW_UP.
+
+**PRIOR CONTEXT RULE:**
+- If the patient mentioned this symptom incidentally in an earlier turn, count it as supporting evidence.
+
+**FOLLOW_UP CRITERIA — be selective, do NOT over-trigger:**
+Use FOLLOW_UP ONLY when:
+1. The patient went completely off-topic (relevance gap).
+2. There is a direct contradiction with a prior answer.
+3. The timeframe is explicitly outside 2 weeks AND re-anchoring would change the score.
+4. The patient used vague frequency language ("sometimes", "a bit", "maybe") without any 
+   other context to infer severity from.
+
+Do NOT use FOLLOW_UP for:
+- Emotional distress without a day-count → infer from language intensity.
+
+STEP 1: SIGNAL DETECTION
+- What explicit or implicit signals appear? Apply Severity Inference Rules.
+- Note any cross-item signals from earlier in the conversation.
+
+STEP 2: ALIGNMENT AUDIT
+- Does this conflict with anything said earlier? If yes → flag misalignment → FOLLOW_UP.
+
+STEP 3: GAP ANALYSIS (selective)
+- Is it genuine ambiguity (off-topic, contradiction, explicit out-of-window)?
+- Or just vagueness (soft language)? → Score 1, not FOLLOW_UP.
+
+STEP 4: FINAL DECISION
+- NEXT_ITEM if you have enough signal. FOLLOW_UP only for the 3 criteria above.
+- Score MUST be integer 0–3. NEVER null. NEVER default 0 without active denial.
 
 OUTPUT FORMAT (JSON ONLY):
 {{
+  "thought": "Step 1: [Signal + Inference] | Step 2: [Alignment] | Step 3: [Gap type or 'vagueness only - scoring directly']",
   "decision": "NEXT_ITEM" or "FOLLOW_UP",
-  "score": (INTEGER 0, 1, 2, or 3. DO NOT RETURN NULL.),
-  "detected_missing_domain": "none", "vagueness", "timeframe", or "relevance",
-  "thought": "Reasoning for score/decision",
-  "question": "Follow-up question if needed"
+  "score": MUST be a raw integer only: 0, 1, 2, or 3. No words. No explanation. Just the digit,
+  "detected_missing_domain": "none", "vagueness", "timeframe", "relevance", or "misalignment",
+  "question": "If FOLLOW_UP, a single targeted clarification question."
 }}
 """),
     ("human", "Conversation History:\n{history}")
@@ -153,16 +242,11 @@ def parse_score(value):
     Reads the Agent's output. Understands integers and clinical words.
     """
     if value is None: return None
-    if isinstance(value, int): return value
+    if isinstance(value, int): return min(max(value, 0), 3)
     
     val_str = str(value).lower().strip()
-    match = re.search(r'[0-3]', val_str)
+    match = re.search(r'\b[0-3]\b', val_str)
     if match: return int(match.group())
-        
-    if "none" in val_str or "not at all" in val_str: return 0
-    if "mild" in val_str or "several" in val_str: return 1
-    if "moderate" in val_str or "half" in val_str: return 2
-    if "severe" in val_str or "nearly" in val_str: return 3
     
     return None
 
@@ -174,92 +258,287 @@ def simulate_rapport_answer(question_text: str, client_profile: Dict[str, Any], 
     except:
         return "I'm doing okay."
 
+def classify_profile_type(profile: Dict[str, Any]) -> str:
+    """
+    Classifies the Participant by checking their INTERNAL DOMAINS.
+    If their 'Inner World' (Tone, Emotion, Beliefs) contains hostility/agitation,
+    they are an EXTERNALIZER. Otherwise, they are an INTERNALIZER.
+    """
+    # 1. Gather all text from the "Internal" keys we defined above
+    internal_text = ""
+    psych = profile.get("psychology", {}) # Depending on your structure, or direct keys
+    
+    # Check strict keys based on your flat or nested structure
+    # (Assuming flattened structure for safety as used in your main code)
+    internal_text += profile.get("Affective_Tone", {}).get("label", "") + " "
+    internal_text += profile.get("Emotion", {}).get("label", "") + " "
+    internal_text += profile.get("Core_Beliefs", {}).get("description", "") + " "
+    internal_text += profile.get("Conversation_Style", {}).get("label", "") + " "
+
+    # 2. Check for Externalizing Keywords in the Internal Data
+    # (People who project their pain outwards)
+    external_triggers = [
+        "Agitated", "Angry", "Hostile", "Irritable", "Suspicious", "Jealous", 
+        "Loud", "Argumentative", "Blame", "Unfair"
+    ]
+    
+    for trigger in external_triggers:
+        if trigger.lower() in internal_text.lower():
+            return "EXTERNALIZER"
+
+    # 3. Default (Depression is usually Internal)
+    return "INTERNALIZER"
+
 def simulate_client_answer(
     item_id: str,
     item_index: int,
     item_label: str,
+    hypothesis_text: str,
     question_text: str,
     client_profile: Dict[str, Any],
     llm: ChatOpenAI,
     is_followup: bool = False,
-):
-    """
-    Returns: (response_text, flaw_injected)
-    Uses a 3-tier difficulty system to test the Agent's diagnostic rigor.
-    """
-    # --- 1. DYNAMIC DIFFICULTY SELECTION ---
-    DIFFICULTY_MODES = ["level1", "level2", "level3"]
-    WEIGHTS = [0.3, 0.5, 0.2] # 30% Direct, 50% Paraphrase, 20% Hard Flaws
+    target_domain: str = None,
+    current_rapport: int = 3
+) -> tuple[str, str, str]:
     
-    # If it's a follow-up, we usually want the client to be clearer (Level 1 or 2)
-    if is_followup:
-        selected_tier = random.choices(["level1", "level2"], weights=[0.6, 0.4], k=1)[0]
+    # --- 1. DETERMINE PSYCHOLOGICAL TYPE & DOMAIN ---
+    participant_type = classify_profile_type(client_profile) 
+    question_domain = PHQ8_QUESTION_MAPPING.get(item_label, "INTERNAL")
+
+    # --- 2. DETERMINE DIFFICULTY (Your Existing Logic) ---
+    selected_tier = "level1"
+    mode_label = "NONE"
+    
+    # CASE A: INTRO / CLOSING
+    if item_id in ["INTRO", "CLOSING"]:
+         diff_instruction = "**Goal: Natural Conversation.** Be polite."
+
+    # CASE B: FOLLOW-UP
+    elif is_followup:
+        mode_label = "RESOLUTION"
+        if current_rapport >= 4:
+             selected_tier = "level1" # Force Open Profile (Unmasked)
+             
+             if target_domain == "timeframe":
+                diff_instruction = (
+                    "**Goal: VULNERABLE DISCLOSURE (Timeframe).**\n"
+                    "The interviewer asks for a time. You feel safe sharing the context.\n"
+                    "**INSTRUCTION:** Provide the specific duration (e.g., '2 weeks') AND explain the emotional trigger or life event that started it. "
+                    "Connect the 'When' to the 'Why' (e.g., 'Since my mother passed...')."
+                )
+             elif target_domain == "vagueness":
+                diff_instruction = (
+                    "**Goal: VULNERABLE DISCLOSURE (Severity).**\n"
+                    "The interviewer asks for specifics. You want them to understand your pain.\n"
+                    "**INSTRUCTION:** Give the concrete frequency/severity (e.g., 'Every night'), but also describe *how it feels* when it happens. "
+                    "Don't just give a number; share the emotional weight of it."
+                )
+             elif target_domain == "relevance":
+                diff_instruction = (
+                    "**Goal: VULNERABLE DISCLOSURE (Connection).**\n"
+                    "You drifted off-topic. Now, explain the deeper connection.\n"
+                    "**INSTRUCTION:** Explicitly link your previous story to the symptom, revealing how that situation fuels your depression. "
+                    "Show them the pattern in your life."
+                )
+             elif target_domain == "contradiction":
+                 diff_instruction = (
+                    "**Goal: VULNERABLE CORRECTION.**\n"
+                    "You contradicted yourself. Admit it openly.\n"
+                    "**INSTRUCTION:** Apologize for the confusion and admit the deeper truth you were initially trying to hide. "
+                    "(e.g., 'I said I was okay, but truthfully I'm barely holding on. I was just afraid to say it.')."
+                )
+             else:
+                diff_instruction = (
+                    "**Goal: FULL DISCLOSURE.**\n"
+                    "**INSTRUCTION:** Answer completely, honestly, and with emotional depth. Do not hold back."
+                )
+        else:
+             # Use specific prompts but keep the tier (mask) of the original question
+             # Actually, for resolution, we usually need them to see a bit more, 
+             # so we'll default to at least Level 2 visibility unless they are truly resistant.
+             selected_tier = "level2" 
+             
+             if target_domain == "timeframe":
+                diff_instruction = (
+                    "**Goal: GRUDGING COMPLIANCE (Vagueness).**\n"
+                    "The interviewer wants a specific number. You feel this is tedious.\n"
+                    "**INSTRUCTION:** Give the concrete number or severity (e.g., '3 days') without any extra storytelling. "
+                    "Be direct but cold."
+                )
+             elif target_domain == "vagueness":
+                diff_instruction = (
+                    "**Goal: RESOLVE VAGUENESS.**\n"
+                    "The interviewer needs to know exactly HOW BAD or HOW OFTEN. You were too vague.\n"
+                    "**INSTRUCTION:** Stop guessing. Give a concrete number, severity rating, or clear description (e.g., '3 times a week', 'It is an 8 out of 10')."
+                )
+             elif target_domain == "relevance":
+                diff_instruction = (
+                    "**Goal: GRUDGING COMPLIANCE (Relevance).**\n"
+                    "The interviewer didn't understand your story.\n"
+                    "**INSTRUCTION:** Briefly state the connection to the symptom so they understand, but do not share any more deep details."
+                )
+             elif target_domain == "contradiction":
+                 diff_instruction = (
+                    "**Goal: GRUDGING COMPLIANCE (Contradiction).**\n"
+                    "You were caught saying two different things.\n"
+                    "**INSTRUCTION:** Admitting you were wrong is embarrassing. Briefly correct yourself (e.g., 'I meant X') and try to change the subject."
+                )
+             else:
+                diff_instruction = (
+                    "**Goal: MINIMAL COMPLIANCE.**\n"
+                    "**INSTRUCTION:** Answer the question with the minimum amount of words required to be clear."
+                )
+
+    # CASE C: NEW ITEM (Internal/External Logic)
     else:
-        selected_tier = random.choices(DIFFICULTY_MODES, weights=WEIGHTS, k=1)[0]
-
-    diff_instruction = ""
-    mode_label = "none"
-
-    # --- 2. DEFINE INSTRUCTIONS & MODE LABEL ---
-    if selected_tier == "level3":
-        flaw_types = ["vagueness", "timeframe", "relevance"]
-        specific_flaw = random.choice(flaw_types)
-        mode_label = specific_flaw 
+        is_mismatch = (participant_type == "INTERNALIZER" and question_domain == "EXTERNAL") or \
+                      (participant_type == "EXTERNALIZER" and question_domain == "INTERNAL")
         
-        if specific_flaw == "vagueness":
+        # 1. TIER SELECTION BASED ON RAPPORT
+        if current_rapport <= 2:
+            # Low Trust: Always stay resistant if there is a mismatch
+            selected_tier = "level3" if is_mismatch else "level2"
+            
+        elif current_rapport == 3:
+            # Medium Trust: Mismatch leads to guardedness, Match leads to openness
+            selected_tier = "level2" if is_mismatch else "level1"
+            
+        else: # Rapport 4 or 5
+            # High Trust: Openness regardless of topic
+            selected_tier = "level1"
+
+        # Generate Instructions
+        if selected_tier == "level3":
+            flaw_pool = ["vagueness", "timeframe", "relevance", "contradiction"]
+            selected_flaws = random.sample(flaw_pool, 2)
+            mode_label = "+".join(selected_flaws).upper()
+            
+            instr_list = []
+            if "vagueness" in selected_flaws: instr_list.append("- **Vagueness:** Use 'sometimes', 'maybe'.")
+            if "timeframe" in selected_flaws: instr_list.append("- **Timeframe:** Talk about past/future only.")
+            if "relevance" in selected_flaws: instr_list.append("- **Relevance:** Drift off-topic.")
+            if "contradiction" in selected_flaws: instr_list.append("- **Contradiction:** Provide an answer that logically conflicts with your history.")
+                
             diff_instruction = (
-                "**Goal: Be Vague.** Use non-committal words like 'sometimes', 'maybe', 'sort of'. "
-                "Do NOT specify frequency. Make it impossible to decide a score."
-            )
-        elif specific_flaw == "timeframe":
-            diff_instruction = (
-                "**Goal: Be Unclear about Time.** Talk about how you felt 'years ago' or 'in the past'. "
-                "Do NOT confirm if this is happening in the last 2 weeks."
-            )
-        elif specific_flaw == "relevance":
-            diff_instruction = (
-                "**Goal: Go Off-Topic.** Ignore the symptom. Talk about a tangential topic "
-                "(e.g., your dog, traffic) using a keyword from the question in the wrong context."
+                f"**Goal: RESISTANCE (Level 3 - {mode_label}).**\n"
+                "You are deeply guarded. You do not trust the interviewer.You feel misunderstood\n"
+                "Commit BOTH errors:\n" + "\n".join(instr_list)
             )
 
-    elif selected_tier == "level2": 
-        mode_label = "VAGUENESS" # Paraphrasing is technically valid, not a "flaw" to be caught
-        diff_instruction = (
-            "**Goal: Natural & Metaphorical.** Do NOT use clinical terms. "
-            "Use metaphors (e.g., 'I feel like a heavy blanket is on me'). "
-            "The answer MUST be valid, just not direct."
-        )
-    else: 
-        mode_label = "NONE"
-        diff_instruction = "**Goal: Clear & Direct.** Be helpful and explicit. Answer with clear frequency."
+        elif selected_tier == "level2":
+            flaw_types = ["vagueness", "timeframe", "relevance", "contradiction"]
+            specific_flaw = random.choice(flaw_types)
+            mode_label = specific_flaw.upper()
 
-    # --- 3. EXECUTE THE ROLEPLAY ---
-    # 1. Prepare Data
-    clinical_signals = (client_profile.get("clinical_signals", {}) or {}).get("symptoms", {})
-    long_key = SYMPTOM_KEY_BY_ITEM_ID.get(item_id, "")
-    symptom_block = clinical_signals.get(long_key, {})
+            if specific_flaw == "vagueness": diff_instruction = "**Goal: Be Vague.** Use non-committal words and avoid specifics."
+            elif specific_flaw == "timeframe": diff_instruction = "**Goal: Be Unclear about Time.** Avoid giving specific dates or recent timeframes."
+            elif specific_flaw == "relevance": diff_instruction = "**Goal: Go Off-Topic.** Pivot slightly away from the symptom"
+            elif specific_flaw == "contradiction": 
+                diff_instruction = (
+                    "**Goal: Clinical Misalignment.** Review your conversation history. "
+                    "Provide a 'Current Answer' that logically conflicts with a 'Past Answer' "
+                    "(e.g., if you previously said you feel 'hopeless', claim you are 'very optimistic about the future' now)."
+                )
+
+        else: # Level 1
+            mode_label = "OPEN"
+            diff_instruction = "**Goal: OPEN (Level 1).** honestly, and with emotional depth."
+
+    # --- 3. EXTRACT FULL PROFILE ---
+    # We grab everything first...
+    persona_age = client_profile.get("persona", {}).get("demographics", {}).get("age", "Unknown")
+    persona_gender = client_profile.get("persona", {}).get("demographics", {}).get("gender", "Unknown")
+    emotion = client_profile.get("Emotion", {}).get("label", "Neutral")
+    affect = client_profile.get("Affective_Tone", {}).get("label", "Neutral")
+    conv_style = client_profile.get("Conversation_Style", {}).get("label", "Plain")
+    behavior_desc = client_profile.get("Behavioral", {}).get("description", "")
+    cognitive_desc = client_profile.get("Cognitive_Patterns", {}).get("description", "")
+    relational_desc = client_profile.get("Relational_Context", {}).get("description", "")
+    core_beliefs = client_profile.get("Core_Beliefs", {}).get("description", "")
+    inter_beliefs = client_profile.get("Intermediate_Beliefs", {}).get("description", "")
+    general_evidence = client_profile.get("Symptom", {}).get("symptom_evidence", "Absent")
+
+    # --- 4. APPLY "UNMASKING" LOGIC ---
+    # We create a 'masked' psychology dictionary based on the Level.
     
-    present = symptom_block.get("present", "absent")
-    severity_hint = symptom_block.get("severity_hint", "none")
-    profile_snippet = get_style_snippet(client_profile)
+    # BASE VISIBILITY (Always Visible)
+    unmasked_psychology = {
+        "current_emotion": emotion,       # They always feel their mood
+        "conversation_style": conv_style  # They always have their style
+    }
+    
+    # LEVEL 3 (RESISTANT): Sees ONLY Surface Traits
+    # "I feel sad, but I don't know why (Beliefs hidden)."
+    if selected_tier == "level3":
+        # HIDE: Beliefs, Relations, Cognition, Behavior
+        unmasked_psychology["cognitive_pattern"] = "UNKNOWN (Repressed)"
+        unmasked_psychology["core_beliefs"] = "UNKNOWN (Inaccessible)"
+        unmasked_psychology["relational_context"] = "UNKNOWN (Too private to share)"
+        unmasked_psychology["symptom_evidence"] = "[MASKED] Unknown (Patient is minimizing physical issues)"
+        
+    # LEVEL 2 (GUARDED): Unlocks Middle Layer
+    # "I feel sad because I overthink (Cognition visible), but I won't tell you my deep trauma."
+    elif selected_tier == "level2":
+        unmasked_psychology["affect"] = affect
+        unmasked_psychology["behavioral_style"] = behavior_desc
+        unmasked_psychology["cognitive_pattern"] = cognitive_desc
+        unmasked_psychology["symptom_evidence"] = general_evidence
+        # STILL HIDDEN:
+        unmasked_psychology["core_beliefs"] = "UNKNOWN (Inaccessible)"
+        unmasked_psychology["relational_context"] = "UNKNOWN (Too private)"
 
-    # 2. Use the Professional Template
-    # We create a small chain here or just invoke the template
-    roleplay_chain = patient_roleplay_template | llm | StrOutputParser() 
+    # LEVEL 1 (OPEN): FULL UNMASKING
+    # "I feel sad because I believe I am unlovable (Core Belief visible)."
+    else: 
+        unmasked_psychology["affect"] = affect
+        unmasked_psychology["behavioral_style"] = behavior_desc
+        unmasked_psychology["cognitive_pattern"] = cognitive_desc
+        unmasked_psychology["relational_context"] = relational_desc
+        unmasked_psychology["core_beliefs"] = core_beliefs
+        unmasked_psychology["intermediate_beliefs"] = inter_beliefs
+        unmasked_psychology["symptom_evidence"] = general_evidence
 
+    # --- 5. PACK THE (MASKED) SNIPPET ---
+    profile_snippet = {
+        "demographics": {"age": persona_age, "gender": persona_gender},
+        "psychology": unmasked_psychology, # <--- Passing the masked version
+        "overall_health_status": general_evidence
+    }
+
+    # --- 6. CONSTRUCT PROMPT ---
+    if item_id == "INTRO":
+        special_instruction = f"Respond naturally. {diff_instruction}"
+    else:
+        severity_guide = (
+            f"**STRICT PROFILE ADHERENCE:** You must strictly follow the 'symptom_evidence' provided in your profile. "
+            f"1. Do not improvise, make up, or exaggerate symptoms to 'act' depressed. "
+            f"2. If your profile says a symptom is 'Absent', you MUST deny it, even if your mood is {emotion}. "
+            f"3. Distinguish between 'Life Stress' and 'Symptoms'. If you are a 'busy student' tired from work but not clinically ill, report it as normal stress. "
+            f"4. Clinical Independence: Each symptom is separate. Do not assume that because you are sad, you must also have poor sleep or appetite."
+        )
+        special_instruction = (
+            f"**Context:** You are feeling {emotion}. Your Focus Type is {participant_type}.\n"
+            f"**Mental State:** Access ONLY the traits listed above. If a trait is 'UNKNOWN', you are unaware of it.\n"
+            f"**Guidance:** {severity_guide}\n"
+            f"**Constraint:** {diff_instruction}" 
+        )
+
+    # --- 7. EXECUTE ---
     try:
-        response_text = roleplay_chain.invoke({
-            "profile_json": json.dumps(profile_snippet, indent=2),
-            "symptom_status": present,
-            "severity": severity_hint,
-            "style_instruction": diff_instruction, #formatted_diff
-            "question_text": question_text
+        print(f"   [Simulation] Type: {participant_type} | Mode: {mode_label} | Level: {selected_tier}") 
+        str_parser = StrOutputParser()
+        chain = participant_template | llm | str_parser
+        resp = chain.invoke({
+            "profile_json": json.dumps(profile_snippet, ensure_ascii=False, indent=2),
+            "question": question_text,
+            "special_instruction": special_instruction
         })
-        # CHANGE: Return selected_tier as the third item in the tuple
-        return response_text.strip(), mode_label, selected_tier 
+        text = resp.strip()
+        return (text if text else "...", mode_label, selected_tier)
     except Exception as e:
-        print(f"Roleplay Error: {e}")
-        return "I'm not sure how to answer that.", "none", "level1"
+        print(f"Simulation Error: {e}")
+        return ("I'm not sure.", "NONE", "level1")
     
 # ================= MAIN LOGIC =================
 def run_session(llm, client_profile, pid):
@@ -298,6 +577,7 @@ def run_session(llm, client_profile, pid):
 
     global_turn_index = 0
     total_score = 0
+    current_rapport = 3
 
     # --- RAPPORT ---
     try:
@@ -307,7 +587,18 @@ def run_session(llm, client_profile, pid):
         global_turn_index += 1
         transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "greeting", "text": intro_text})
 
-        part_reply = simulate_rapport_answer(intro_text, client_profile, llm) 
+        part_reply, _, _ = simulate_client_answer(
+            item_id="INTRO",
+            item_index=0,
+            item_label="Rapport",
+            hypothesis_text="Establish professional rapport", # Added this
+            question_text=intro_text,
+            client_profile=client_profile,
+            llm=llm, # Python now sees the LLM correctly
+            is_followup=False,
+            current_rapport=current_rapport
+        )
+
         print(f"{PARTICIPANT_NAME}: {part_reply}")
         global_turn_index += 1
         transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "greeting_reply", "text": part_reply})
@@ -366,8 +657,15 @@ def run_session(llm, client_profile, pid):
             # 2. GENERATE THE PARTICIPANT'S ANSWER (Using the new tiered logic)
             # Note: current_difficulty is now handled internally by simulate_client_answer
             reply_text, flaw_injected, level_selected = simulate_client_answer(
-                item_id, shown, label, opener, client_profile, llm,
-                is_followup=False
+                item_id=item_id,
+                item_index=shown,
+                item_label=label,
+                hypothesis_text=hyp_text,
+                question_text=opener,
+                client_profile=client_profile,
+                llm=llm,
+                is_followup=False,
+                current_rapport=current_rapport   # You can start at 3 and increase/decrease this based on Agent behavior!
             )
 
             print(f"{PARTICIPANT_NAME} (Injected: {flaw_injected}): {reply_text}")
@@ -379,29 +677,45 @@ def run_session(llm, client_profile, pid):
             })
 
             # 3. PSYCHOLOGIST'S DECISION (PASS 1)
-            history_str = f"Psychologist: {opener}\nParticipant: {reply_text}"
+            history_str = "\n".join([
+                f"{t['speaker']}: {t['text']}" 
+                for t in transcript 
+                if t['speaker'] in [AI_NAME, PARTICIPANT_NAME]
+            ])
             decision_data = assessment_chain.invoke({
                 "item_index": shown, "item_label": label, "hypothesis_text": hyp_text, "history": history_str
             })
             
             decision = decision_data.get("decision", "NEXT_ITEM")
             thought = decision_data.get("thought", "")
-            detected_flaw = decision_data.get("detected_missing_domain", "none").lower()
+            detected_flaw = decision_data.get("detected_missing_domain", "none").lower().strip()
             score = parse_score(decision_data.get("score"))
+
+            if score is None:
+            # Don't guess — force one more attempt
+                decision = "FOLLOW_UP"
+                decision_data["question"] = "Could you tell me more specifically how often you've been experiencing this?"
             
             # LOGGING: Did the Agent catch the flaw we injected?
             bot_caught_it = False
-            if flaw_injected == "none":
+            if flaw_injected == "NONE":
                 if decision == "NEXT_ITEM": bot_caught_it = True
+            elif "+" in flaw_injected:  # This identifies your new Level 3
+                # Success if the Agent asks for a FOLLOW_UP 
+                # AND identifies ANY of the flaws you actually injected
+                active_flaws = flaw_injected.lower().split("+")
+                if decision == "FOLLOW_UP" and detected_flaw in active_flaws:
+                    bot_caught_it = True
             else:
-                # Success if the Agent asks for a follow-up AND identifies why
-                if decision == "FOLLOW_UP" and detected_flaw == flaw_injected:
+                # Level 2 logic (Single Flaw)
+                if decision == "FOLLOW_UP" and detected_flaw == flaw_injected.lower():
                     bot_caught_it = True
 
             analysis_log.append({
                 "PID": pid, 
                 "Item": item_id, 
                 "Turn": "Initial",
+                "Rapport_Score": current_rapport,
                 "Level": level_selected,  # <--- NEW FIELD
                 "Injected_Flaw": flaw_injected, 
                 "Detected_Flaw": detected_flaw,
@@ -414,48 +728,103 @@ def run_session(llm, client_profile, pid):
             transcript.append({"turn_index": global_turn_index, "speaker": "Agent_Internal_Monologue", "text": thought})
             agent_thoughts.append({"item_index": shown, "turn_index": global_turn_index, "decision": decision, "score": score, "thought": thought})
 
-            # 4. FOLLOW-UP LOGIC
+            # === PASTE THE DYNAMIC RAPPORT LOGIC HERE ===
+            rapport_change = 0
             if decision == "FOLLOW_UP":
+                rapport_change = 1
+                if current_rapport < 5:
+                    current_rapport += 1
+                print(f"   [Trust Up] Rapport is now {current_rapport}. Agent showed they are listening.")
+
+            elif decision == "NEXT_ITEM" and detected_flaw != "none":
+                # The participant was being difficult but the agent ignored it
+                rapport_change = -1
+                if current_rapport > 1:
+                    current_rapport -= 1
+                print(f"   [Trust Down] Rapport is now {current_rapport}. Agent was dismissive.")
+            
+            # --- 4. DYNAMIC PERSISTENCE LOOP ---
+            turn_count = 0
+            max_turns = 3  # Maximum attempts to resolve a single symptom
+            domain_attempt_count = {}
+            
+            while decision == "FOLLOW_UP" and turn_count < max_turns:
+                turn_count += 1
                 evidence_log[f"Item {shown}"]["supporting"][-1]["followup_asked"] = True
-                followup_q = decision_data.get("question", "Could you tell me a bit more about that?")
-                print(f"{AI_NAME} (Probing for {detected_flaw}): {followup_q}")
+                followup_q = decision_data.get("question", "Could you clarify how often that happens?")
                 
+                print(f"{AI_NAME} (Probe {turn_count} for {detected_flaw}): {followup_q}")
+                
+                # Update Rapport (Listening increases trust)
+                if current_rapport < 5:
+                    current_rapport += 1
+
+                # 1. Log the Psychologist's Question
                 global_turn_index += 1
                 transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "followup_question", "text": followup_q})
 
-                # Participant responds more clearly for follow-ups
+                # 2. Participant Responds
                 reply_text_2, _, _ = simulate_client_answer(
-                    item_id, shown, label, followup_q, client_profile, llm,
-                    is_followup=True
+                    item_id=item_id, item_index=shown, item_label=label, 
+                    hypothesis_text=hyp_text, question_text=followup_q, 
+                    client_profile=client_profile, llm=llm,
+                    is_followup=True, target_domain=detected_flaw, 
+                    current_rapport=current_rapport
                 )
+                
                 print(f"{PARTICIPANT_NAME}: {reply_text_2}")
                 global_turn_index += 1
                 transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "followup_answer", "text": reply_text_2})
 
-                analysis_log.append({
-                    "PID": pid, "Item": item_id, "Turn": "Follow-up", # Changed to Follow-up
-                    "Level": level_selected, "Injected_Flaw": "REVEALED", 
-                    "Detected_Flaw": "none", "Agent_Decision": "RESOLVING", 
-                    "Bot_Caught_Flaw": True, "Agent_Score": -1, # Temporary score
-                    "Participant_Text": reply_text_2
-                })
+                # 3. Update History String
+                history_str += f"\nPsychologist: {followup_q}\nParticipant: {reply_text_2}"
 
-                history_str_2 = (
-                    f"{history_str}\n"
-                    f"Psychologist: {followup_q}\n"
-                    f"Participant: {reply_text_2}\n"
-                    f"(SYSTEM: Please provide the final score 0-3 now.)"
+                # 4. Re-evaluate (This checks if we can finally move to NEXT_ITEM)
+                resolution_suffix = (
+                    "\n\n(SYSTEM - Resolution Phase: "
+                    "1. If patient has clarified, commit to NEXT_ITEM. "
+                    "2. Re-evaluate score from ALL turns — do not anchor to the initial estimate. "
+                    "3. If follow-up revealed MORE severity, revise score UPWARD. "
+                    "4. Only use FOLLOW_UP again if a NEW unresolved gap emerged.)"
                 )
-
-                decision_data_2 = assessment_chain.invoke({
-                    "item_index": shown, "item_label": label, "hypothesis_text": hyp_text, "history": history_str_2
+                decision_data = assessment_chain.invoke({
+                    "item_index": shown,
+                    "item_label": label,
+                    "hypothesis_text": hyp_text,
+                    "history": history_str + resolution_suffix  # FIX: encourages upward revision
                 })
+
+                # 5. Update loop control variables
+                decision = decision_data.get("decision", "NEXT_ITEM")
+                detected_flaw = decision_data.get("detected_missing_domain", "none").lower().strip()
+                # Track how many times we've asked about this specific domain
+                domain_attempt_count[detected_flaw] = domain_attempt_count.get(detected_flaw, 0) + 1
+
+                if domain_attempt_count.get(detected_flaw, 0) >= 2:
+                    print(f"   [Domain Limit] '{detected_flaw}' asked twice with no resolution. Moving on.")
+                    decision = "NEXT_ITEM"  # Force exit even if still unclear
                 
-                new_score = parse_score(decision_data_2.get("score"))
-                if new_score is not None: score = new_score
-                decision = "RESOLVED_FOLLOW_UP"
-            
-            # FINAL SCORE TRACKING
+                # Overwrite the score estimate with each turn
+                new_score = parse_score(decision_data.get("score"))
+                if new_score is not None:
+                    score = new_score
+                
+                # Log this specific follow-up turn to your CSV
+                analysis_log.append({
+                    "PID": pid, "Item": item_id, "Turn": f"Follow-up {turn_count}",
+                    "Rapport_Score": current_rapport, "Level": level_selected, 
+                    "Injected_Flaw": "REVEALING", "Detected_Flaw": detected_flaw, 
+                    "Agent_Decision": decision, "Bot_Caught_Flaw": True, 
+                    "Agent_Score": score, "Participant_Text": reply_text_2
+                })
+
+            # --- EXITING THE LOOP ---
+            if decision == "FOLLOW_UP":
+                print(f"   [Warning] Item {shown} timed out after {max_turns} turns. Using final estimate: {score}")
+            else:
+                print(f"   [Scoring Success] Item {shown} resolved to Score: {score}")
+
+            # FINAL STEP: Add the resolved score to the total once
             if score is not None:
                 total_score += score
                 
@@ -469,7 +838,7 @@ def run_session(llm, client_profile, pid):
             with open(analysis_path, "w", newline="", encoding="utf-8") as f:
                 # CHANGE: Added "Level" to fieldnames
                 fieldnames = [
-                    "PID", "Item", "Turn", "Level", "Injected_Flaw", "Detected_Flaw", 
+                    "PID", "Item", "Turn", "Rapport_Score", "Level", "Injected_Flaw", "Detected_Flaw", 
                     "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"
                 ]
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
