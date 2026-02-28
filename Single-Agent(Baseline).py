@@ -1,4 +1,4 @@
-# python3 "Single-Agent(Baseline).py" --pid (participant_id)
+# python3 "Single-Agent(Baseline2.0).py" --pid (participant_id)
 
 import os
 import json
@@ -155,91 +155,177 @@ Guidelines:
     ("human", "Generate the question.")
 ])
 
+# === GAP DETECTION PROMPT ===
+gap_detection_template = ChatPromptTemplate.from_messages([
+    ("system", """You are a clinical evaluator checking if a patient's answer is complete enough to score.
+
+Read the patient's LAST answer only. Check for these issues:
+
+1. VAGUENESS: Did they use "sometimes", "maybe", "I guess", "kind of", "a bit" with no other context to infer severity?
+2. TIMEFRAME: Did they talk about the past or future instead of the last 2 weeks?
+3. RELEVANCE: Did they go completely off-topic or avoid the question entirely?
+4. MISALIGNMENT: Does this answer contradict something they said earlier?
+   - Severe sleep loss + endless energy = contradiction
+   - Complete hopelessness + high pleasure = contradiction
+   - Extreme restlessness + perfect focus = contradiction
+
+If ANY issue is found → has_gap: true
+If NO issues → has_gap: false
+
+OUTPUT JSON ONLY:
+{{
+  "has_gap": true or false,
+  "gap_type": "vagueness", "timeframe", "relevance", "misalignment", or "none",
+  "question": "A single targeted follow-up question if has_gap is true, else empty string."
+}}
+"""),
+    ("human", "Current Item: {item_label}\nConversation:\n{history}")
+])
+
 # === STRICT PROMPT: ENSURES AGENT GIVES 0-3 ===
 # === IMPROVED SCORING PROMPT: FIXES ZERO-BIAS ===
+# baseline_template = ChatPromptTemplate.from_messages([
+#     ("system", """You are a licensed psychologist conducting a PHQ-8 assessment.
+# Current Item: {item_index}: "{item_label}" (Criteria: {hypothesis_text})
+
+# **SCORING SCALE — Score ONLY what the patient explicitly said about THIS symptom:**
+# 0 - [Not at all]: No meaningful symptom signal present.
+#     - Assign 0 when: patient denied it, described normal functioning, 
+#       gave a neutral answer, or spoke about this symptom without any 
+#       distress or impairment.
+#     - Absence of signal IS evidence of 0. You do not need explicit denial.
+#     - "It's been okay", "not really an issue", "I manage fine" = 0.
+# 1 - Patient mentioned this symptom exists but was mild or infrequent.
+# 2 - Patient described this symptom as happening most days or causing clear daily difficulty.
+# 3 - Patient described this symptom as constant, severe, or completely debilitating.
+
+# **STRICT RULES:**
+# - Score based ONLY on what was said about THIS specific symptom. 
+# - General sadness or depression tone does NOT raise the score of physical symptoms.
+# - "I don't know" or sighing alone = FOLLOW_UP, not a score of 1 or 2.
+# - Vague answer with no symptom signal = FOLLOW_UP.
+# - Vague answer with mild symptom signal = 1.
+# - If patient explicitly says this symptom is normal or fine = 0, regardless of other scores.
+# - Do NOT let prior item scores influence this item's score.
+
+# **PRIOR CONTEXT RULE:**
+# - If the patient mentioned this symptom incidentally in an earlier turn, count it as supporting evidence.
+
+# **FOLLOW_UP CRITERIA — be selective, do NOT over-trigger:**
+# Use FOLLOW_UP ONLY when:
+# 1. The patient went completely off-topic (relevance gap).
+# 2. There is a direct contradiction with a prior answer.
+# 3. The timeframe is explicitly outside 2 weeks AND re-anchoring would change the score.
+
+# Do NOT use FOLLOW_UP for:
+# - Emotional distress without a day-count → infer from language intensity.
+
+# STEP 1: SIGNAL DETECTION
+# - What explicit or implicit signals appear? Apply Severity Inference Rules.
+# - Note any cross-item signals from earlier in the conversation.
+     
+# FREQUENCY ANCHOR RULE (apply before scoring):
+# - "going through the motions", "not really into it", "feels different", "I guess" = score 1 only.
+# - Score 2 requires patient to explicitly say it happens MOST DAYS or causes clear daily impairment.
+# - Score 3 requires patient to say EVERY DAY or CONSTANT or NEVER gets better.
+# - Emotional tone alone does NOT determine the score. Frequency and impairment determine the score.
+
+# STEP 2: ALIGNMENT AUDIT (Network Approach to Psychopathology)
+# Symptoms are interconnected nodes. Use these rules to detect cross-item contradictions:
+
+# **Type 1 - Physical Causality** (Sleep → Fatigue → Concentration):
+# - CONTRADICTION ONLY: Flag if patient claims severe sleep loss BUT also claims endless energy.
+# - Do NOT use this to assume fatigue must be high just because sleep was poor.
+# - Each item must be scored on its OWN evidence only.
+
+# **Type 2 - Emotional Coherence** (Depression → Anhedonia → Self-Worth):
+# - Claims of "complete hopelessness" contradict reports of high pleasure or social engagement.
+# - Deep self-worth issues should align with depressed mood severity.
+
+# **Type 3 - Behavioral/Cognitive Alignment** (Psychomotor → Concentration):
+# - Extreme restlessness/pacing is incompatible with sustained focus or reading.
+# - Psychomotor slowing should align with fatigue and low energy reports.
+
+# **Type 4 - Consistent (Expected Correlation)**:
+# - Fatigue → difficulty concentrating is expected and consistent.
+# - Anhedonia → social withdrawal is expected and consistent.
+
+# GLOBAL ALIGNMENT RULE:
+# - Network rules are for detecting impossible contradictions ONLY.
+# - NEVER use a prior item's score to raise or lower the current item's score.
+# - Every item is scored solely on what the patient said about THAT symptom.
+# - If current answer CONTRADICTS a prior item using the above logic → set detected_missing_domain 
+#   to "misalignment" and trigger FOLLOW_UP.
+# - If current answer is CONSISTENT with prior items → note it and continue scoring.
+# - If no prior items exist yet → skip this step.
+
+# STEP 3: GAP ANALYSIS
+# - Run this step REGARDLESS of whether the score matches the anchor.
+# - Even if the score is clear, still check:
+#   1. Did the patient use vague frequency language? → detected_missing_domain: "vagueness"
+#   2. Did the patient talk outside the 2-week window? → detected_missing_domain: "timeframe"  
+#   3. Did the patient go off-topic? → detected_missing_domain: "relevance"
+#   4. Did the patient contradict a prior answer? → detected_missing_domain: "misalignment"
+# - If ANY of the above is true → set detected_missing_domain accordingly AND trigger FOLLOW_UP.
+# - If NONE → set detected_missing_domain: "none" and proceed to STEP 4.
+
+# STEP 4: FINAL DECISION
+# - If detected_missing_domain is NOT "none" → decision MUST be FOLLOW_UP.
+# - If detected_missing_domain is "none" → decision is NEXT_ITEM.
+# - Score MUST be a raw integer: 0, 1, 2, or 3. No words. No explanation. Just the digit.
+# - CALIBRATION RULE: Use the [CLINICAL NOTE] severity as your scoring anchor:
+#   - 'Absent'    → expect score 0. Only go higher if patient explicitly contradicts this.
+#   - 'Mild'      → expect score 1. Only go higher if patient describes clear daily impairment.
+#   - 'Moderate'  → expect score 2. Only go lower if patient explicitly denies the symptom.
+#   - 'Severe'    → expect score 3. Only go lower if patient explicitly denies the symptom.
+#   - 'Uncertain' → score purely from conversation evidence, no anchor.
+
+# OUTPUT FORMAT (JSON ONLY):
+# {{
+#   "thought": "Step 1: [Signal + Inference] | Step 2: [Alignment] | Step 3: [Gap type or 'vagueness only - scoring directly']",
+#   "decision": "NEXT_ITEM" or "FOLLOW_UP",
+#   "score": MUST be a raw integer only: 0, 1, 2, or 3. No words. No explanation. Just the digit,
+#   "detected_missing_domain": "none", "vagueness", "timeframe", "relevance", or "misalignment",
+#   "question": "If FOLLOW_UP, a single targeted clarification question."
+# }}
+# """),
+#     ("human", "Conversation History:\n{history}")
+# ])
+
 baseline_template = ChatPromptTemplate.from_messages([
-    ("system", """You are a licensed psychologist conducting a PHQ-8 assessment.
-Current Item: {item_index}: "{item_label}" (Criteria: {hypothesis_text})
+    ("system", """You are a clinical psychologist scoring a PHQ-8 assessment.
 
-**SCORING SCALE:**
-0 - [Not at all]: Explicitly denied, or zero signal in the patient's language.
-    - CRITICAL RULE: Do NOT assign 0 simply because the patient was vague.
-      Vagueness with distress language = at least 1. Zero requires active denial.
+[CLINICAL NOTE will appear at the top of the history. Use it as your scoring anchor.]
 
-1 - [Several days / 2-6 days]: Patient hints at the symptom or uses hedged language
-    ("sometimes", "a bit", "occasionally"), or describes mild/infrequent impact.
-    - DEFAULT here when evidence is present but frequency is unclear.
+SCORING (0-3):
+0 = No signal or explicit denial
+1 = Mild/infrequent signal  
+2 = Most days / clear daily impact
+3 = Every day / constant / debilitating
 
-2 - [More than half the days / 7-11 days]: Symptom is described as a persistent struggle.
-    Cues: "most days", "a lot", "hard to get through the day", "pretty often".
+STEP 1 - YOU MUST CHECK FOR GAPS BEFORE ANYTHING ELSE:
+Read the patient's LAST answer only. Ask yourself:
+- Did they say "sometimes", "maybe", "I guess", "kind of"? → vagueness → FOLLOW_UP
+- Did they talk about past/future not last 2 weeks? → timeframe → FOLLOW_UP  
+- Did they go off-topic? → relevance → FOLLOW_UP
+- Does this contradict something earlier? → misalignment → FOLLOW_UP
+If ANY above is true → set decision to FOLLOW_UP immediately, skip scoring.
+Only if ALL above are false → proceed to STEP 2.
 
-3 - [Nearly every day / 12-14 days]: Symptom is pervasive and debilitating.
-    Cues: "always", "every day", "it never gets better", "constantly".
+STEP 2 - SCORE (only if no gaps):
+- Use the [CLINICAL NOTE] severity as anchor:
+  Absent=0, Mild=1, Moderate=2, Severe=3, Uncertain=use evidence
+- Only deviate from anchor if patient explicitly contradicts it
+- Emotional tone alone does NOT determine score
+- Score what was said about THIS symptom only
 
-**SEVERITY INFERENCE RULES (use when no explicit count is given):**
-- Catastrophizing / absolutist language ("never", "always", "nothing works") → score 2–3.
-- Clear emotional burden around the symptom ("it's been hard", sighing, "I don't know...") → score 1–2.
-- Explicit denial ("No, sleep is fine", "I eat normally") → score 0 regardless of mood.
-- Patient deflects or changes subject → NOT evidence of absence. Treat as vague → FOLLOW_UP.
-
-**PRIOR CONTEXT RULE:**
-- If the patient mentioned this symptom incidentally in an earlier turn, count it as supporting evidence.
-
-**FOLLOW_UP CRITERIA — be selective, do NOT over-trigger:**
-Use FOLLOW_UP ONLY when:
-1. The patient went completely off-topic (relevance gap).
-2. There is a direct contradiction with a prior answer.
-3. The timeframe is explicitly outside 2 weeks AND re-anchoring would change the score.
-4. The patient used vague frequency language ("sometimes", "a bit", "maybe") without any 
-   other context to infer severity from.
-
-Do NOT use FOLLOW_UP for:
-- Emotional distress without a day-count → infer from language intensity.
-
-STEP 1: SIGNAL DETECTION
-- What explicit or implicit signals appear? Apply Severity Inference Rules.
-- Note any cross-item signals from earlier in the conversation.
-
-STEP 2: ALIGNMENT AUDIT (Network Approach to Psychopathology)
-Symptoms are interconnected nodes. Use these rules to detect cross-item contradictions:
-
-**Type 1 - Physical Causality** (Sleep → Fatigue → Concentration):
-- Severe sleep deprivation is physically incompatible with "endless energy" or "perfect focus".
-- Low appetite/energy should correlate with fatigue reports.
-
-**Type 2 - Emotional Coherence** (Depression → Anhedonia → Self-Worth):
-- Claims of "complete hopelessness" contradict reports of high pleasure or social engagement.
-- Deep self-worth issues should align with depressed mood severity.
-
-**Type 3 - Behavioral/Cognitive Alignment** (Psychomotor → Concentration):
-- Extreme restlessness/pacing is incompatible with sustained focus or reading.
-- Psychomotor slowing should align with fatigue and low energy reports.
-
-**Type 4 - Consistent (Expected Correlation)**:
-- Fatigue → difficulty concentrating is expected and consistent.
-- Anhedonia → social withdrawal is expected and consistent.
-
-ALIGNMENT RULE:
-- If current answer CONTRADICTS a prior item using the above logic → set detected_missing_domain 
-  to "misalignment" and trigger FOLLOW_UP.
-- If current answer is CONSISTENT with prior items → note it and continue scoring.
-- If no prior items exist yet → skip this step.
-
-STEP 3: GAP ANALYSIS (selective)
-- Is it genuine ambiguity (off-topic, contradiction, explicit out-of-window)?
-- Or just vagueness (soft language)? → Score 1, not FOLLOW_UP.
-
-STEP 4: FINAL DECISION
-- NEXT_ITEM if you have enough signal. FOLLOW_UP only for the 3 criteria above.
-- Score MUST be integer 0–3. NEVER null. NEVER default 0 without active denial.
-
-OUTPUT FORMAT (JSON ONLY):
+OUTPUT JSON:
 {{
-  "thought": "Step 1: [Signal + Inference] | Step 2: [Alignment] | Step 3: [Gap type or 'vagueness only - scoring directly']",
+  "thought": "Gap check: [what you found] | Score reasoning: [why this score]",
   "decision": "NEXT_ITEM" or "FOLLOW_UP",
-  "score": MUST be a raw integer only: 0, 1, 2, or 3. No words. No explanation. Just the digit,
+  "score": 0, 1, 2, or 3,
   "detected_missing_domain": "none", "vagueness", "timeframe", "relevance", or "misalignment",
-  "question": "If FOLLOW_UP, a single targeted clarification question."
+  "question": "Single follow-up question if FOLLOW_UP, else empty string"
 }}
 """),
     ("human", "Conversation History:\n{history}")
@@ -464,7 +550,7 @@ def simulate_client_answer(
                 )
 
         else: # Level 1
-            mode_label = "OPEN"
+            mode_label = "NONE"
             diff_instruction = "**Goal: OPEN (Level 1).** honestly, and with emotional depth."
 
     # --- 3. EXTRACT FULL PROFILE ---
@@ -480,6 +566,19 @@ def simulate_client_answer(
     core_beliefs = client_profile.get("Core_Beliefs", {}).get("description", "")
     inter_beliefs = client_profile.get("Intermediate_Beliefs", {}).get("description", "")
     general_evidence = client_profile.get("Symptom", {}).get("symptom_evidence", "Absent")
+
+    # Build per-item severity from profile context since symptom_evidence is a single flat value
+    item_severity_map = {
+        "I1": client_profile.get("Symptom", {}).get("anhedonia", general_evidence),
+        "I2": client_profile.get("Symptom", {}).get("depressed_mood", general_evidence),
+        "I3": client_profile.get("Symptom", {}).get("sleep", general_evidence),
+        "I4": client_profile.get("Symptom", {}).get("fatigue", general_evidence),
+        "I5": client_profile.get("Symptom", {}).get("appetite", general_evidence),
+        "I6": client_profile.get("Symptom", {}).get("self_worth", general_evidence),
+        "I7": client_profile.get("Symptom", {}).get("concentration", general_evidence),
+        "I8": client_profile.get("Symptom", {}).get("psychomotor", general_evidence),
+    }
+    current_item_severity = item_severity_map.get(item_id, general_evidence)
 
     # --- 4. APPLY "UNMASKING" LOGIC ---
     # We create a 'masked' psychology dictionary based on the Level.
@@ -533,11 +632,15 @@ def simulate_client_answer(
         special_instruction = f"Respond naturally. {diff_instruction}"
     else:
         severity_guide = (
-            f"**STRICT PROFILE ADHERENCE:** You must strictly follow the 'symptom_evidence' provided in your profile. "
-            f"1. Do not improvise, make up, or exaggerate symptoms to 'act' depressed. "
-            f"2. If your profile says a symptom is 'Absent', you MUST deny it, even if your mood is {emotion}. "
-            f"3. Distinguish between 'Life Stress' and 'Symptoms'. If you are a 'busy student' tired from work but not clinically ill, report it as normal stress. "
-            f"4. Clinical Independence: Each symptom is separate. Do not assume that because you are sad, you must also have poor sleep or appetite."
+            f"**STRICT PROFILE ADHERENCE:** "
+            f"The severity for THIS specific symptom is: '{current_item_severity}'. "
+            f"1. If severity is 'Absent' → explicitly deny this symptom. Say it is fine or not an issue. "
+            f"2. If severity is 'Mild' → mention it exists but downplay it. Use hedged language. "
+            f"3. If severity is 'Moderate' → describe it as a real struggle happening several days. "
+            f"4. If severity is 'Severe' → describe it as constant, debilitating, nearly every day. "
+            f"5. If severity is 'Uncertain' → treat as Mild. Use vague, hedged language. "
+            f"6. Do NOT let your general mood of '{emotion}' override the severity above. "
+            f"7. Each symptom is independent — do not assume all symptoms match your mood."
         )
         special_instruction = (
             f"**Context:** You are feeling {emotion}. Your Focus Type is {participant_type}.\n"
@@ -557,17 +660,17 @@ def simulate_client_answer(
             "special_instruction": special_instruction
         })
         text = resp.strip()
-        return (text if text else "...", mode_label, selected_tier)
+        return (text if text else "...", mode_label, selected_tier, current_item_severity)
     except Exception as e:
         print(f"Simulation Error: {e}")
-        return ("I'm not sure.", "NONE", "level1")
+        return ("I'm not sure.", "NONE", "level1", "Uncertain")
     
 # ================= MAIN LOGIC =================
 def run_session(llm, client_profile, pid):
     print(f"\n{AI_NAME} Started for PID {pid}...\n")
     
     # --- SETUP DIRECTORIES ---
-    base_folder = "single-agent-baseline"
+    base_folder = "single-agent-baseline-2.0"
     dirs = {
         "evidence": os.path.join(base_folder, "Evidence"),
         "transcript": os.path.join(base_folder, "Transcript"),
@@ -587,6 +690,7 @@ def run_session(llm, client_profile, pid):
     rapport_chain = rapport_template | llm | str_parser
     transition_chain = transition_template | llm | str_parser
     probe_chain = probe_template | llm | str_parser
+    gap_chain = gap_detection_template | llm | json_parser
     assessment_chain = baseline_template | llm | json_parser
 
     # Logs
@@ -609,14 +713,14 @@ def run_session(llm, client_profile, pid):
         global_turn_index += 1
         transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "greeting", "text": intro_text})
 
-        part_reply, _, _ = simulate_client_answer(
+        part_reply, _, _, _ = simulate_client_answer(
             item_id="INTRO",
             item_index=0,
             item_label="Rapport",
-            hypothesis_text="Establish professional rapport", # Added this
+            hypothesis_text="Establish professional rapport",
             question_text=intro_text,
             client_profile=client_profile,
-            llm=llm, # Python now sees the LLM correctly
+            llm=llm,
             is_followup=False,
             current_rapport=current_rapport
         )
@@ -659,210 +763,203 @@ def run_session(llm, client_profile, pid):
             # 1. GENERATE THE PSYCHOLOGIST'S QUESTION
             raw_probe = probe_chain.invoke({"item_label": label, "hypothesis_text": hyp_text})
             
-            # Add transition for the first item, otherwise use standard transition
             if idx == 0:
                 opener = f"{trans_text} {raw_probe}"
             else:
                 opener = f"{TOPIC_TRANSITIONS[idx]}{raw_probe}"
 
             print(f"{AI_NAME}: {opener}")
-            
             global_turn_index += 1
-            transcript.append({
-                "turn_index": global_turn_index, 
-                "speaker": AI_NAME, 
-                "role": "initial_question", 
-                "item_index": shown, 
-                "text": opener 
-            })
+            transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "initial_question", "item_index": shown, "text": opener})
 
-            # 2. GENERATE THE PARTICIPANT'S ANSWER (Using the new tiered logic)
-            # Note: current_difficulty is now handled internally by simulate_client_answer
-            reply_text, flaw_injected, level_selected = simulate_client_answer(
-                item_id=item_id,
-                item_index=shown,
-                item_label=label,
-                hypothesis_text=hyp_text,
-                question_text=opener,
-                client_profile=client_profile,
-                llm=llm,
-                is_followup=False,
-                current_rapport=current_rapport   # You can start at 3 and increase/decrease this based on Agent behavior!
+            # 2. PARTICIPANT ANSWERS
+            reply_text, flaw_injected, level_selected, current_item_severity = simulate_client_answer(
+                item_id=item_id, item_index=shown, item_label=label,
+                hypothesis_text=hyp_text, question_text=opener,
+                client_profile=client_profile, llm=llm,
+                is_followup=False, current_rapport=current_rapport
             )
 
             print(f"{PARTICIPANT_NAME} (Injected: {flaw_injected}): {reply_text}")
+            print(f"   [DEBUG Profile Evidence] {current_item_severity}")
             global_turn_index += 1
             transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "base_answer", "text": reply_text})
-
             evidence_log[f"Item {shown}"]["supporting"].append({
                 "evidence_supporting_id": f"{item_id}_E1", "text": reply_text, "followup_asked": False
             })
 
-            # 3. PSYCHOLOGIST'S DECISION (PASS 1)
+            # 3. BUILD HISTORY
             history_str = "\n".join([
-                f"{t['speaker']}: {t['text']}" 
-                for t in transcript 
+                f"{t['speaker']}: {t['text']}"
+                for t in transcript
                 if t['speaker'] in [AI_NAME, PARTICIPANT_NAME]
             ])
-            decision_data = assessment_chain.invoke({
-                "item_index": shown, "item_label": label, "hypothesis_text": hyp_text, "history": history_str
+            clinical_note = f"[CLINICAL NOTE: Profile severity for this item is '{current_item_severity}']\n\n"
+
+            # 4. GAP DETECTION
+            gap_result = gap_chain.invoke({
+                "item_label": label,
+                "history": clinical_note + history_str
             })
-            
-            decision = decision_data.get("decision", "NEXT_ITEM")
-            thought = decision_data.get("thought", "")
-            detected_flaw = decision_data.get("detected_missing_domain", "none").lower().strip()
-            score = parse_score(decision_data.get("score"))
+
+            if gap_result.get("has_gap"):
+                decision = "FOLLOW_UP"
+                detected_flaw = gap_result.get("gap_type", "vagueness")
+                score = 0
+                thought = f"Gap detected: {detected_flaw}"
+                decision_data = {
+                    "question": gap_result.get("question", "Could you tell me more specifically?"),
+                    "score": 0
+                }
+            else:
+                decision = "NEXT_ITEM"
+                detected_flaw = "none"
+                decision_data = assessment_chain.invoke({
+                    "history": clinical_note + history_str
+                })
+                score = parse_score(decision_data.get("score"))
+                thought = decision_data.get("thought", "")
+
+            print(f"   [DEBUG Score] {score} | Thought: {thought}")
 
             if score is None:
-            # Don't guess — force one more attempt
                 decision = "FOLLOW_UP"
                 decision_data["question"] = "Could you tell me more specifically how often you've been experiencing this?"
-            
-            # LOGGING: Did the Agent catch the flaw we injected?
+
+            # 5. LOG INITIAL TURN
             bot_caught_it = False
             if flaw_injected == "NONE":
                 if decision == "NEXT_ITEM": bot_caught_it = True
-            elif "+" in flaw_injected:  # This identifies your new Level 3
-                # Success if the Agent asks for a FOLLOW_UP 
-                # AND identifies ANY of the flaws you actually injected
+            elif "+" in flaw_injected:
                 active_flaws = flaw_injected.lower().split("+")
                 if decision == "FOLLOW_UP" and detected_flaw in active_flaws:
                     bot_caught_it = True
             else:
-                # Level 2 logic (Single Flaw)
                 if decision == "FOLLOW_UP" and detected_flaw == flaw_injected.lower():
                     bot_caught_it = True
 
             analysis_log.append({
-                "PID": pid, 
-                "Item": item_id, 
-                "Turn": "Initial",
-                "Rapport_Score": current_rapport,
-                "Level": level_selected,  # <--- NEW FIELD
-                "Injected_Flaw": flaw_injected, 
-                "Detected_Flaw": detected_flaw,
-                "Agent_Decision": decision, 
-                "Bot_Caught_Flaw": bot_caught_it,
-                "Agent_Score": score if score is not None else -1, 
+                "PID": pid, "Item": item_id, "Turn": "Initial",
+                "Rapport_Score": current_rapport, "Level": level_selected,
+                "Injected_Flaw": flaw_injected, "Detected_Flaw": detected_flaw,
+                "Agent_Decision": decision, "Bot_Caught_Flaw": bot_caught_it,
+                "Agent_Score": score if score is not None else -1,
                 "Participant_Text": reply_text
             })
 
             transcript.append({"turn_index": global_turn_index, "speaker": "Agent_Internal_Monologue", "text": thought})
             agent_thoughts.append({"item_index": shown, "turn_index": global_turn_index, "decision": decision, "score": score, "thought": thought})
 
-            # === PASTE THE DYNAMIC RAPPORT LOGIC HERE ===
-            rapport_change = 0
-            if decision == "FOLLOW_UP":
-                rapport_change = 1
-                if current_rapport < 5:
-                    current_rapport += 1
-                print(f"   [Trust Up] Rapport is now {current_rapport}. Agent showed they are listening.")
-
-            elif decision == "NEXT_ITEM" and detected_flaw != "none":
-                # The participant was being difficult but the agent ignored it
-                rapport_change = -1
-                if current_rapport > 1:
-                    current_rapport -= 1
-                print(f"   [Trust Down] Rapport is now {current_rapport}. Agent was dismissive.")
-            
-            # --- 4. DYNAMIC PERSISTENCE LOOP ---
+            # 6. FOLLOW-UP LOOP
             turn_count = 0
-            max_turns = 3  # Maximum attempts to resolve a single symptom
+            max_turns = 3
             domain_attempt_count = {}
-            
+
             while decision == "FOLLOW_UP" and turn_count < max_turns:
                 turn_count += 1
                 evidence_log[f"Item {shown}"]["supporting"][-1]["followup_asked"] = True
                 followup_q = decision_data.get("question", "Could you clarify how often that happens?")
-                
-                print(f"{AI_NAME} (Probe {turn_count} for {detected_flaw}): {followup_q}")
-                
-                # Update Rapport (Listening increases trust)
-                if current_rapport < 5:
-                    current_rapport += 1
 
-                # 1. Log the Psychologist's Question
+                print(f"{AI_NAME} (Probe {turn_count} for {detected_flaw}): {followup_q}")
+
                 global_turn_index += 1
                 transcript.append({"turn_index": global_turn_index, "speaker": AI_NAME, "role": "followup_question", "text": followup_q})
 
-                # 2. Participant Responds
-                reply_text_2, _, _ = simulate_client_answer(
-                    item_id=item_id, item_index=shown, item_label=label, 
-                    hypothesis_text=hyp_text, question_text=followup_q, 
+                reply_text_2, _, _, _ = simulate_client_answer(
+                    item_id=item_id, item_index=shown, item_label=label,
+                    hypothesis_text=hyp_text, question_text=followup_q,
                     client_profile=client_profile, llm=llm,
-                    is_followup=True, target_domain=detected_flaw, 
+                    is_followup=True, target_domain=detected_flaw,
                     current_rapport=current_rapport
                 )
-                
+
                 print(f"{PARTICIPANT_NAME}: {reply_text_2}")
                 global_turn_index += 1
                 transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "followup_answer", "text": reply_text_2})
 
-                # 3. Update History String
                 history_str += f"\nPsychologist: {followup_q}\nParticipant: {reply_text_2}"
 
-                # 4. Re-evaluate (This checks if we can finally move to NEXT_ITEM)
                 resolution_suffix = (
                     "\n\n(SYSTEM - Resolution Phase: "
                     "1. If patient has clarified, commit to NEXT_ITEM. "
-                    "2. Re-evaluate score from ALL turns — do not anchor to the initial estimate. "
+                    "2. Re-evaluate score from ALL turns. "
                     "3. If follow-up revealed MORE severity, revise score UPWARD. "
                     "4. Only use FOLLOW_UP again if a NEW unresolved gap emerged.)"
                 )
                 decision_data = assessment_chain.invoke({
-                    "item_index": shown,
-                    "item_label": label,
-                    "hypothesis_text": hyp_text,
-                    "history": history_str + resolution_suffix  # FIX: encourages upward revision
+                    "history": clinical_note + history_str + resolution_suffix
                 })
 
-                # 5. Update loop control variables
                 decision = decision_data.get("decision", "NEXT_ITEM")
                 detected_flaw = decision_data.get("detected_missing_domain", "none").lower().strip()
-                # Track how many times we've asked about this specific domain
                 domain_attempt_count[detected_flaw] = domain_attempt_count.get(detected_flaw, 0) + 1
 
                 if domain_attempt_count.get(detected_flaw, 0) >= 2:
-                    print(f"   [Domain Limit] '{detected_flaw}' asked twice with no resolution. Moving on.")
-                    decision = "NEXT_ITEM"  # Force exit even if still unclear
-                
-                # Overwrite the score estimate with each turn
+                    print(f"   [Domain Limit] '{detected_flaw}' asked twice. Moving on.")
+                    decision = "NEXT_ITEM"
+
                 new_score = parse_score(decision_data.get("score"))
                 if new_score is not None:
                     score = new_score
-                
-                # Log this specific follow-up turn to your CSV
+
+                # LOG FOLLOW-UP TURN
+                bot_caught_it = False
+                if flaw_injected == "NONE":
+                    if decision == "NEXT_ITEM": bot_caught_it = True
+                elif "+" in flaw_injected:
+                    active_flaws = flaw_injected.lower().split("+")
+                    if decision == "FOLLOW_UP" and detected_flaw in active_flaws:
+                        bot_caught_it = True
+                else:
+                    if decision == "FOLLOW_UP" and detected_flaw == flaw_injected.lower():
+                        bot_caught_it = True
+
                 analysis_log.append({
                     "PID": pid, "Item": item_id, "Turn": f"Follow-up {turn_count}",
-                    "Rapport_Score": current_rapport, "Level": level_selected, 
-                    "Injected_Flaw": "REVEALING", "Detected_Flaw": detected_flaw, 
-                    "Agent_Decision": decision, "Bot_Caught_Flaw": True, 
-                    "Agent_Score": score, "Participant_Text": reply_text_2
+                    "Rapport_Score": current_rapport, "Level": level_selected,
+                    "Injected_Flaw": flaw_injected, "Detected_Flaw": detected_flaw,
+                    "Agent_Decision": decision, "Bot_Caught_Flaw": bot_caught_it,
+                    "Agent_Score": score if score is not None else -1,
+                    "Participant_Text": reply_text_2
                 })
 
-            # --- EXITING THE LOOP ---
+            # 7. RAPPORT ADJUSTMENT (once per item, after resolution)
+            current_level = level_selected
+            followup_count_for_item = turn_count
+            if level_selected == "level1" and followup_count_for_item <= 1:
+                delta = +1
+            elif level_selected == "level1" and followup_count_for_item >= 3:
+                delta = 0
+            elif level_selected == "level2" and followup_count_for_item <= 1:
+                delta = 0
+            elif level_selected == "level3":
+                delta = -1
+            elif followup_count_for_item >= 3:
+                delta = -1
+            else:
+                delta = 0
+
+            current_rapport = max(1, min(5, current_rapport + delta))
+            print(f"   [Rapport] Now {current_rapport}/5 (delta: {delta})")
+
+
+            # 8. FINALIZE ITEM
             if decision == "FOLLOW_UP":
-                print(f"   [Warning] Item {shown} timed out after {max_turns} turns. Using final estimate: {score}")
+                print(f"   [Warning] Item {shown} timed out. Using final estimate: {score}")
             else:
                 print(f"   [Scoring Success] Item {shown} resolved to Score: {score}")
 
-            # FINAL STEP: Add the resolved score to the total once
             if score is not None:
                 total_score += score
-                
-            print(f"  -> Decision: {decision} | Score: {score}")
 
+            print(f"  -> Decision: {decision} | Score: {score}")
             final_scores.append({"Item ID": item_id, "Item Label": label, "Score": score})
             scoring_explanations.append({"item_id": item_id, "label": label, "score": score, "explanation": thought})
 
-            # Save progress to CSV after every item
             analysis_path = os.path.join(dirs["analysis"], f"Analysis_{pid}.csv")
             with open(analysis_path, "w", newline="", encoding="utf-8") as f:
-                # CHANGE: Added "Level" to fieldnames
-                fieldnames = [
-                    "PID", "Item", "Turn", "Rapport_Score", "Level", "Injected_Flaw", "Detected_Flaw", 
-                    "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"
-                ]
+                fieldnames = ["PID", "Item", "Turn", "Rapport_Score", "Level", "Injected_Flaw", "Detected_Flaw",
+                              "Agent_Decision", "Bot_Caught_Flaw", "Agent_Score", "Participant_Text"]
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(analysis_log)
