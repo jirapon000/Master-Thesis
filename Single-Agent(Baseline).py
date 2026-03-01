@@ -14,6 +14,10 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 
+import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
 load_dotenv()
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -24,6 +28,14 @@ LLM_MODEL = "gpt-4o-mini"
 LLM_TEMPERATURE = 0
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+ENTAILMENT_MODEL_NAME = "roberta-large-mnli"
+ENTAIL_THRESHOLD = 0.7
+CONTRADICT_THRESHOLD = 0.7
+
+print(f"Loading entailment model...")
+ENT_TOKENIZER = AutoTokenizer.from_pretrained(ENTAILMENT_MODEL_NAME)
+ENT_MODEL = AutoModelForSequenceClassification.from_pretrained(ENTAILMENT_MODEL_NAME)
+ENT_MODEL.eval()
 # ================= DATA MAPPING =================
 SYMPTOM_KEY_BY_ITEM_ID: Dict[str, str] = {
     "I1": "anhedonia (loss of interest/pleasure)",
@@ -305,6 +317,15 @@ OUTPUT JSON:
 ])
 
 # ================= HELPERS =================
+def compute_nli_probs(premise: str, hypothesis: str) -> Dict[str, float]:
+    premise = (premise or "").strip()
+    if not premise: return {"p_contradict": 0.0, "p_neutral": 0.0, "p_entail": 0.0}
+    inputs = ENT_TOKENIZER(premise, hypothesis, return_tensors="pt", truncation=True, max_length=512)
+    with torch.no_grad():
+        logits = ENT_MODEL(**inputs).logits
+    probs = F.softmax(logits, dim=-1)[0].tolist()
+    return {"p_contradict": probs[0], "p_neutral": probs[1], "p_entail": probs[2]}
+
 def build_llm(model_name: str):
     return ChatOpenAI(model=model_name, temperature=LLM_TEMPERATURE, api_key=OPENAI_API_KEY)
 
@@ -712,19 +733,25 @@ def run_session(llm, client_profile, pid):
 
     # --- PHQ-8 LOOP ---
     PHQ8_HYPOTHESES = [
-        {"item_id": "I1", "label": "Anhedonia", "text": "Little interest or pleasure in doing things."},
-        {"item_id": "I2", "label": "Depressed mood", "text": "Feeling depressed, down, or hopeless."},
-        {"item_id": "I3", "label": "Sleep problems", "text": "Trouble falling/staying asleep, or sleeping too much."},
-        {"item_id": "I4", "label": "Fatigue", "text": "Feeling tired or having little energy."},
-        {"item_id": "I5", "label": "Appetite change", "text": "Poor appetite or overeating."},
-        {"item_id": "I6", "label": "Self-worth", "text": "Feeling bad about yourself or that you are a failure."},
-        {"item_id": "I7", "label": "Concentration", "text": "Trouble concentrating on things."},
-        {"item_id": "I8", "label": "Psychomotor", "text": "Moving or speaking so slowly (or being fidgety/restless)."}
+        {"item_id": "I1", "label": "Anhedonia",       "text": "I have lost interest or pleasure in activities I used to enjoy."},
+        {"item_id": "I2", "label": "Depressed mood",  "text": "I feel down, depressed, or hopeless."},
+        {"item_id": "I3", "label": "Sleep problems",  "text": "I have trouble sleeping or I sleep too much."},
+        {"item_id": "I4", "label": "Fatigue",         "text": "I feel tired or have little energy."},
+        {"item_id": "I5", "label": "Appetite change", "text": "I have a poor appetite or I am overeating."},
+        {"item_id": "I6", "label": "Self-worth",      "text": "I feel bad about myself or that I have let my family down."},
+        {"item_id": "I7", "label": "Concentration",   "text": "I have trouble concentrating on things."},
+        {"item_id": "I8", "label": "Psychomotor",     "text": "I have been moving or speaking slowly, or feeling fidgety and restless."}
     ]
     TOPIC_TRANSITIONS = ["", "Thanks for sharing. ", "Got it. ", "Thanks. ", "I appreciate your honesty. ", "That helps. ", "Okay. ", "Thanks for letting me know. "]
     
     for h in PHQ8_HYPOTHESES:
-        evidence_log[f"Item {h['item_id'][1]}"] = {"label": h["label"], "item_id": h["item_id"], "supporting": []}
+        evidence_log[f"Item {h['item_id'][1]}"] = {
+            "label": h["label"], 
+            "item_id": h["item_id"], 
+            "supporting": [], 
+            "contradicting": [], 
+            "neutral": []
+        }
 
     # --- PHQ-8 LOOP (FIXED) ---
     for idx, h in enumerate(PHQ8_HYPOTHESES):
@@ -758,9 +785,6 @@ def run_session(llm, client_profile, pid):
             print(f"   [DEBUG Profile Evidence] {current_item_severity}")
             global_turn_index += 1
             transcript.append({"turn_index": global_turn_index, "speaker": PARTICIPANT_NAME, "role": "base_answer", "text": reply_text})
-            evidence_log[f"Item {shown}"]["supporting"].append({
-                "evidence_supporting_id": f"{item_id}_E1", "text": reply_text, "followup_asked": False
-            })
 
             # 3. BUILD HISTORY
             history_str = "\n".join([
@@ -782,6 +806,22 @@ def run_session(llm, client_profile, pid):
             if score is None:
                 decision = "FOLLOW_UP"
                 decision_data["question"] = "Could you tell me more specifically how often you've been experiencing this?"
+
+            # 4b. NLI CLASSIFICATION
+            probs = compute_nli_probs(reply_text, hyp_text)
+            role = "neutral"
+            if probs["p_entail"] >= ENTAIL_THRESHOLD: role = "supporting"
+            elif probs["p_contradict"] >= CONTRADICT_THRESHOLD: role = "contradicting"
+
+            current_count = len(evidence_log[f"Item {shown}"][role]) + 1
+            evidence_log[f"Item {shown}"][role].append({
+                f"evidence_{role}_id": f"{item_id}_{role}_E{current_count}",
+                "text": reply_text,
+                "p_entail": round(probs["p_entail"], 4),
+                "p_contradict": round(probs["p_contradict"], 4),
+                "p_neutral": round(probs["p_neutral"], 4)
+            })
+            print(f"   [NLI] Role: {role} | p_entail: {probs['p_entail']:.2f} | p_contradict: {probs['p_contradict']:.2f}")
 
             # 5. LOG INITIAL TURN
             bot_caught_it = False
@@ -814,7 +854,11 @@ def run_session(llm, client_profile, pid):
 
             while decision == "FOLLOW_UP" and turn_count < max_turns:
                 turn_count += 1
-                evidence_log[f"Item {shown}"]["supporting"][-1]["followup_asked"] = True
+                # Find the last entry across all roles and mark followup_asked
+                for role_key in ["supporting", "contradicting", "neutral"]:
+                    if evidence_log[f"Item {shown}"][role_key]:
+                        evidence_log[f"Item {shown}"][role_key][-1]["followup_asked"] = True
+                        break
                 followup_q = decision_data.get("question", "Could you clarify how often that happens?")
 
                 print(f"{AI_NAME} (Probe {turn_count} for {detected_flaw}): {followup_q}")
