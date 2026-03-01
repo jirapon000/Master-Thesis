@@ -1,4 +1,4 @@
-# python3 "Single-Agent(Baseline2.0).py" --pid (participant_id)
+# python3 "Single-Agent(Baseline).py" --pid (participant_id)
 
 import os
 import json
@@ -153,33 +153,6 @@ Guidelines:
    - *Example for Appetite:* 'How has your interest in food or your eating habits been lately?'
 4. **Format:** Only ask ONE question. No multi-part questions."""),
     ("human", "Generate the question.")
-])
-
-# === GAP DETECTION PROMPT ===
-gap_detection_template = ChatPromptTemplate.from_messages([
-    ("system", """You are a clinical evaluator checking if a patient's answer is complete enough to score.
-
-Read the patient's LAST answer only. Check for these issues:
-
-1. VAGUENESS: Did they use "sometimes", "maybe", "I guess", "kind of", "a bit" with no other context to infer severity?
-2. TIMEFRAME: Did they talk about the past or future instead of the last 2 weeks?
-3. RELEVANCE: Did they go completely off-topic or avoid the question entirely?
-4. MISALIGNMENT: Does this answer contradict something they said earlier?
-   - Severe sleep loss + endless energy = contradiction
-   - Complete hopelessness + high pleasure = contradiction
-   - Extreme restlessness + perfect focus = contradiction
-
-If ANY issue is found → has_gap: true
-If NO issues → has_gap: false
-
-OUTPUT JSON ONLY:
-{{
-  "has_gap": true or false,
-  "gap_type": "vagueness", "timeframe", "relevance", "misalignment", or "none",
-  "question": "A single targeted follow-up question if has_gap is true, else empty string."
-}}
-"""),
-    ("human", "Current Item: {item_label}\nConversation:\n{history}")
 ])
 
 # === STRICT PROMPT: ENSURES AGENT GIVES 0-3 ===
@@ -500,17 +473,19 @@ def simulate_client_answer(
 
     # CASE C: NEW ITEM (Internal/External Logic)
     else:
-        is_mismatch = (participant_type == "INTERNALIZER" and question_domain == "EXTERNAL") or \
-                      (participant_type == "EXTERNALIZER" and question_domain == "INTERNAL")
+        # is_mismatch = (participant_type == "INTERNALIZER" and question_domain == "EXTERNAL") or \
+        #               (participant_type == "EXTERNALIZER" and question_domain == "INTERNAL")
         
         # 1. TIER SELECTION BASED ON RAPPORT
         if current_rapport <= 2:
             # Low Trust: Always stay resistant if there is a mismatch
-            selected_tier = "level3" if is_mismatch else "level2"
+            selected_tier = "level3" 
+            # if is_mismatch else "level2"
             
         elif current_rapport == 3:
             # Medium Trust: Mismatch leads to guardedness, Match leads to openness
-            selected_tier = "level2" if is_mismatch else "level1"
+            selected_tier = "level2" 
+            # if is_mismatch else "level1"
             
         else: # Rapport 4 or 5
             # High Trust: Openness regardless of topic
@@ -670,7 +645,7 @@ def run_session(llm, client_profile, pid):
     print(f"\n{AI_NAME} Started for PID {pid}...\n")
     
     # --- SETUP DIRECTORIES ---
-    base_folder = "single-agent-baseline-2.0"
+    base_folder = "single-agent-baseline"
     dirs = {
         "evidence": os.path.join(base_folder, "Evidence"),
         "transcript": os.path.join(base_folder, "Transcript"),
@@ -690,7 +665,6 @@ def run_session(llm, client_profile, pid):
     rapport_chain = rapport_template | llm | str_parser
     transition_chain = transition_template | llm | str_parser
     probe_chain = probe_template | llm | str_parser
-    gap_chain = gap_detection_template | llm | json_parser
     assessment_chain = baseline_template | llm | json_parser
 
     # Logs
@@ -796,31 +770,14 @@ def run_session(llm, client_profile, pid):
             ])
             clinical_note = f"[CLINICAL NOTE: Profile severity for this item is '{current_item_severity}']\n\n"
 
-            # 4. GAP DETECTION
-            gap_result = gap_chain.invoke({
-                "item_label": label,
+            # 4. SCORING
+            decision_data = assessment_chain.invoke({
                 "history": clinical_note + history_str
             })
-
-            if gap_result.get("has_gap"):
-                decision = "FOLLOW_UP"
-                detected_flaw = gap_result.get("gap_type", "vagueness")
-                score = 0
-                thought = f"Gap detected: {detected_flaw}"
-                decision_data = {
-                    "question": gap_result.get("question", "Could you tell me more specifically?"),
-                    "score": 0
-                }
-            else:
-                decision = "NEXT_ITEM"
-                detected_flaw = "none"
-                decision_data = assessment_chain.invoke({
-                    "history": clinical_note + history_str
-                })
-                score = parse_score(decision_data.get("score"))
-                thought = decision_data.get("thought", "")
-
-            print(f"   [DEBUG Score] {score} | Thought: {thought}")
+            decision = decision_data.get("decision", "NEXT_ITEM")
+            detected_flaw = decision_data.get("detected_missing_domain", "none").lower().strip()
+            score = parse_score(decision_data.get("score"))
+            thought = decision_data.get("thought", "")
 
             if score is None:
                 decision = "FOLLOW_UP"
@@ -924,14 +881,13 @@ def run_session(llm, client_profile, pid):
                 })
 
             # 7. RAPPORT ADJUSTMENT (once per item, after resolution)
-            current_level = level_selected
             followup_count_for_item = turn_count
             if level_selected == "level1" and followup_count_for_item <= 1:
                 delta = +1
-            elif level_selected == "level1" and followup_count_for_item >= 3:
-                delta = 0
             elif level_selected == "level2" and followup_count_for_item <= 1:
-                delta = 0
+                delta = +1   # ← resolved quickly despite being guarded (before was 0)
+            elif level_selected == "level2" and followup_count_for_item >= 3:
+                delta = -1   # ← struggled even at medium difficulty (before was 0)
             elif level_selected == "level3":
                 delta = -1
             elif followup_count_for_item >= 3:
