@@ -290,9 +290,10 @@ SCORING (0-3):
 
 STEP 1 - YOU MUST CHECK FOR GAPS BEFORE ANYTHING ELSE:
 Read the patient's LAST answer only. Ask yourself:
-- Did they say "sometimes", "maybe", "I guess", "kind of"? → vagueness → FOLLOW_UP
+- Did they say "sometimes", "maybe", "I guess", "kind of" without showing clear severity or frequency? → vagueness → FOLLOW_UP
+  EXCEPTION: If vague words are used to DENY the symptom (e.g., "I guess it's fine", "not really an issue") → NOT vagueness → score 0
 - Did they talk about past/future not last 2 weeks? → timeframe → FOLLOW_UP  
-- Did they go off-topic? → relevance → FOLLOW_UP
+ Did they go off-topic? or was the symptom caused only by an external factor without describing the symptom itself? → relevance → FOLLOW_UP
 - Does this contradict something earlier? → misalignment → FOLLOW_UP
 If ANY above is true → set decision to FOLLOW_UP immediately, skip scoring.
 Only if ALL above are false → proceed to STEP 2.
