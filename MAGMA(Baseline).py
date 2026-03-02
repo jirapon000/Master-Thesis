@@ -368,6 +368,19 @@ def simulate_client_answer(
     inter_beliefs = client_profile.get("Intermediate_Beliefs", {}).get("description", "")
     general_evidence = client_profile.get("Symptom", {}).get("symptom_evidence", "Absent")
 
+# Build per-item severity from profile context since symptom_evidence is a single flat value
+    item_severity_map = {
+        "I1": client_profile.get("Symptom", {}).get("anhedonia", general_evidence),
+        "I2": client_profile.get("Symptom", {}).get("depressed_mood", general_evidence),
+        "I3": client_profile.get("Symptom", {}).get("sleep", general_evidence),
+        "I4": client_profile.get("Symptom", {}).get("fatigue", general_evidence),
+        "I5": client_profile.get("Symptom", {}).get("appetite", general_evidence),
+        "I6": client_profile.get("Symptom", {}).get("self_worth", general_evidence),
+        "I7": client_profile.get("Symptom", {}).get("concentration", general_evidence),
+        "I8": client_profile.get("Symptom", {}).get("psychomotor", general_evidence),
+    }
+    current_item_severity = item_severity_map.get(item_id, general_evidence)
+
     # --- 4. APPLY "UNMASKING" LOGIC ---
     # We create a 'masked' psychology dictionary based on the Level.
     
@@ -420,11 +433,15 @@ def simulate_client_answer(
         special_instruction = f"Respond naturally. {diff_instruction}"
     else:
         severity_guide = (
-            f"**STRICT PROFILE ADHERENCE:** You must strictly follow the 'symptom_evidence' provided in your profile. "
-            f"1. Do not improvise, make up, or exaggerate symptoms to 'act' depressed. "
-            f"2. If your profile says a symptom is 'Absent', you MUST deny it, even if your mood is {emotion}. "
-            f"3. Distinguish between 'Life Stress' and 'Symptoms'. If you are a 'busy student' tired from work but not clinically ill, report it as normal stress. "
-            f"4. Clinical Independence: Each symptom is separate. Do not assume that because you are sad, you must also have poor sleep or appetite."
+            f"**STRICT PROFILE ADHERENCE:** "
+            f"The severity for THIS specific symptom is: '{current_item_severity}'. "
+            f"1. If severity is 'Absent' → explicitly deny this symptom. Say it is fine or not an issue. "
+            f"2. If severity is 'Mild' → mention it exists but downplay it. Use hedged language. "
+            f"3. If severity is 'Moderate' → describe it as a real struggle happening several days. "
+            f"4. If severity is 'Severe' → describe it as constant, debilitating, nearly every day. "
+            f"5. If severity is 'Uncertain' → treat as Mild. Use vague, hedged language. "
+            f"6. Do NOT let your general mood of '{emotion}' override the severity above. "
+            f"7. Each symptom is independent — do not assume all symptoms match your mood."
         )
         special_instruction = (
             f"**Context:** You are feeling {emotion}. Your Focus Type is {participant_type}.\n"
@@ -443,10 +460,10 @@ def simulate_client_answer(
             "special_instruction": special_instruction
         })
         text = resp.strip()
-        return (text if text else "...", mode_label, selected_tier)
+        return (text if text else "...", mode_label, selected_tier, current_item_severity)
     except Exception as e:
         print(f"Simulation Error: {e}")
-        return ("I'm not sure.", "NONE", "level1")
+        return ("I'm not sure.", "NONE", "level1", "Unknown")
 
 # ================= STATE DEFINITION =================
 class AgentState(TypedDict):
@@ -986,7 +1003,7 @@ def participant_node(state: AgentState):
     current_rapport = state.get("rapport_score", 3)
     
     # 3. Run Simulation (KEPT EXACTLY AS IS)
-    answer_text, diff_mode, diff_level = simulate_client_answer(
+    answer_text, diff_mode, diff_level, item_severity = simulate_client_answer(
         item_id=state["current_item_id"],
         item_index=state["current_item_index"],
         item_label=state["current_item_label"],
@@ -995,7 +1012,7 @@ def participant_node(state: AgentState):
         client_profile=profile_obj,
         llm=llm,
         is_followup=is_followup_flag,
-        target_domain= target_domain,
+        target_domain=target_domain,
         current_rapport=current_rapport
     )
     
