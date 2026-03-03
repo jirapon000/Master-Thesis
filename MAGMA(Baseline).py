@@ -854,23 +854,7 @@ Analyze the patient's complete history for the specific item below. You must log
      
 **CLINICAL REASONING HIERARCHY:**
 1. **Default to Zero:** Every item starts at Score 0. You only move to up to Score 1 or higher if there is EXPLICIT evidence of a recurring clinical pattern.
-2. **Vagueness Rule:** Distinguish between two types of vagueness:
-- **Denial vagueness** (e.g., "not really", "I don't think so", "it's fine") 
-  → Score 0. Patient is indicating absence of symptom.
-- **Evasion vagueness** (e.g., "I don't know", "maybe", "I guess", 
-  deflecting, changing subject despite follow-ups) → Use clinical judgment:
-  * Score 1 if patient evades but shows mild distress signals 
-    (hesitation, topic changes, brief acknowledgment like "sometimes I guess")
-  * Score 2 if patient evades consistently across ALL follow-ups AND 
-    shows stronger distress signals (emotional tone, sighing, 
-    shutting down, "I really don't want to talk about this")
-  * Score 3 only if patient explicitly confirms near-daily occurrence
-    despite their resistance
-  A real psychologist treats persistent evasion as clinically significant.
-  Patients who are deeply uncomfortable discussing a symptom often 
-  have it at a meaningful level. Evasion intensity maps to severity.
-  When torn between two scores, choose the one most supported 
-  by the overall pattern of the conversation, not just the last answer.
+2. **Vagueness = 0:** If the patient's frequency is vague (e.g., "sometimes," "I don't know," "maybe"), and they fail to clarify after follow-ups, you MUST assign **Score 0**. Vagueness is NOT evidence of a symptom.
 3. **Intensity vs. Frequency:** Do not confuse "feeling bad" with "frequency of symptoms." A patient can feel very sad (High Intensity) only once a week (Score 0). 
    - *Rule:* If frequency is not established as "Several Days" (2+ days), the score is 0 regardless of how intense the feeling is.
 4. **Normal Life Stress Filter:** Distinguish between "Clinical Depression" and "Situational Stress." If a participant is tired because of work or a PhD deadline, that is a **Score 0**. It is a logical reaction to life, not a symptom of a disorder.
@@ -983,7 +967,7 @@ def question_node(state: AgentState):
             
         instruction = state.get("nav_instruction", "Start this item by bridging from their last response.")
 
-    hist_str = "\n".join(state["history"][-6:])
+    hist_str = "\n".join(state["history"][-4:])
     
     question = (question_template | llm | str_parser).invoke({
         "item_label": state["current_item_label"],
@@ -1103,7 +1087,7 @@ def clarification_node(state: AgentState):
     summary_reason = res.get("reason", "")
     missing = res.get("missing_domains", [])
 
-    print(f"   [Quality Check] Status: {status} | Reasoning: {cot_reasoning}")
+    # print(f"   [Quality Check] Status: {status} | Reasoning: {cot_reasoning}")
     
     return {
         "clarification_status": status,
@@ -1279,18 +1263,19 @@ def navigation_node(state: AgentState):
     raw_mode = state.get("current_difficulty", "none").lower()
     current_lvl = state.get("current_level", "level1")
     
-    if raw_mode == "none": 
+    if raw_mode == "none":
         injected_flaw = "none"
-    elif raw_mode in ["vagueness", "timeframe", "relevance", "contradiction"]:
-        injected_flaw = raw_mode
+    elif raw_mode in ["open", "resolution", "none"]:
+        injected_flaw = "none"          # ← these are not flaws
     elif "+" in raw_mode:
-        injected_flaw = raw_mode
+        injected_flaw = raw_mode.replace("+", ", ")
     else:
-        injected_flaw = "none"
+        injected_flaw = raw_mode
     # ------------------------------------------------------------------ 
 
     detected_flaw = "none"
-    if missing_list: detected_flaw = missing_list[0] 
+    if missing_list: 
+        detected_flaw = ", ".join(missing_list)
 
     turn_label = "Initial" if state["followup_count"] == 0 else f"FollowUp_{state['followup_count']}"
     
@@ -1593,8 +1578,6 @@ def batch_scoring_node(state: AgentState):
         sufficiency = res.get("data_sufficiency", "UNKNOWN")
         explanation = res.get("explanation", "")
         reasoning = res.get("reasoning_chain", {})
-
-        reasoning_summary = " | ".join([f"{k}: {v}" for k, v in reasoning.items()])
         
         print(f"   ✅ Scored {item_id}: {score} ({item_label})")
         
@@ -1609,8 +1592,7 @@ def batch_scoring_node(state: AgentState):
             "Item ID": item_id, 
             "Item Label": item_label, 
             "Score": score,
-            "Sufficiency": sufficiency,
-            "Reasoning": reasoning_summary
+            "Sufficiency": sufficiency
         })
         scoring_explanations.append({
             "item_id": item_id, 
@@ -1652,10 +1634,13 @@ def build_graph():
 
     # 2. DEFINE EDGES (The Flow)
     workflow.set_entry_point("question_node")
-
     workflow.add_edge("question_node", "participant_node")
+
+    # --- FAN-OUT: Trigger both nodes at once ---
     workflow.add_edge("participant_node", "clarification_node")
     workflow.add_edge("clarification_node", "alignment_node")
+
+    #--- FAN-IN: Wait for both to finish before moving to Navigation ---
     workflow.add_edge("alignment_node", "navigation_node")
 
     # Navigation logic (Split between Follow-up or Next Item)
@@ -1807,7 +1792,7 @@ def main():
     ]
     csv_path = os.path.join(dirs["sc"], f"Scores_{args.pid}.csv")
     with open(csv_path, "w", newline="") as f:
-        fieldnames = ["Item ID", "Item Label", "Score", "Sufficiency", "Reasoning"]
+        fieldnames = ["Item ID", "Item Label", "Score", "Sufficiency"]
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(csv_data)
