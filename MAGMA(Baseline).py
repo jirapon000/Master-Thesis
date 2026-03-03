@@ -367,19 +367,8 @@ def simulate_client_answer(
     core_beliefs = client_profile.get("Core_Beliefs", {}).get("description", "")
     inter_beliefs = client_profile.get("Intermediate_Beliefs", {}).get("description", "")
     general_evidence = client_profile.get("Symptom", {}).get("symptom_evidence", "Absent")
-
-# Build per-item severity from profile context since symptom_evidence is a single flat value
-    item_severity_map = {
-        "I1": client_profile.get("Symptom", {}).get("anhedonia", general_evidence),
-        "I2": client_profile.get("Symptom", {}).get("depressed_mood", general_evidence),
-        "I3": client_profile.get("Symptom", {}).get("sleep", general_evidence),
-        "I4": client_profile.get("Symptom", {}).get("fatigue", general_evidence),
-        "I5": client_profile.get("Symptom", {}).get("appetite", general_evidence),
-        "I6": client_profile.get("Symptom", {}).get("self_worth", general_evidence),
-        "I7": client_profile.get("Symptom", {}).get("concentration", general_evidence),
-        "I8": client_profile.get("Symptom", {}).get("psychomotor", general_evidence),
-    }
-    current_item_severity = item_severity_map.get(item_id, general_evidence)
+    
+    current_item_severity = general_evidence
 
     # --- 4. APPLY "UNMASKING" LOGIC ---
     # We create a 'masked' psychology dictionary based on the Level.
@@ -439,7 +428,7 @@ def simulate_client_answer(
             f"2. If severity is 'Mild' → mention it exists but downplay it. Use hedged language. "
             f"3. If severity is 'Moderate' → describe it as a real struggle happening several days. "
             f"4. If severity is 'Severe' → describe it as constant, debilitating, nearly every day. "
-            f"5. If severity is 'Uncertain' → treat as Mild. Use vague, hedged language. "
+            f"5. If severity is 'Uncertain' → treat as Mild. Use vague, hedged language, unsure about the symptoms. "
             f"6. Do NOT let your general mood of '{emotion}' override the severity above. "
             f"7. Each symptom is independent — do not assume all symptoms match your mood."
         )
@@ -859,9 +848,25 @@ Analyze the patient's complete history for the specific item below. You must log
    - *Rule:* If frequency is not established as "Several Days" (2+ days), the score is 0 regardless of how intense the feeling is.
 4. **Normal Life Stress Filter:** Distinguish between "Clinical Depression" and "Situational Stress." If a participant is tired because of work or a PhD deadline, that is a **Score 0**. It is a logical reaction to life, not a symptom of a disorder.
 
-**STRICT CALIBRATION OVERRIDE:** - **The Evidence Rule:** Choose the score that is most supported by the explicit evidence in the transcript. If the patient described a recurring pattern with clear language, score it. Only default to 0 if there is genuinely no evidence of the symptom, not simply because the evidence is imperfect.
+**STRICT CALIBRATION OVERRIDE:** - **The Skeptic's Rule**: When in doubt between two scores, always choose the lower score. Evidence must be explicit and come from the transcript only, not inferred from emotional tone or profile.
 - **Anti-Metaphor Bias:** If a patient uses a metaphor (e.g., "I'm a zombie"), treat it as a figure of speech. Do not use it as evidence of frequency unless they confirm it happens most days.
 - **Independence of Items:** Just because a patient scored high on "Mood" does not mean they should score high on "Appetite." Treat every item as a completely fresh start.
+
+**INSTRUCTION ON CONVERSATIONAL DYNAMICS:**
+1. **IGNORE VOLUME OF QUESTIONS:** The number of follow-up questions is a result 
+   of the interview structure, NOT the patient's severity.
+2. **RESISTANCE != SEVERITY:** If a patient is vague or evasive, do NOT 
+   automatically increase the score. Only score based on the actual 
+   information revealed in the transcript.
+3. **TRUTH OVER PERSISTENCE:** A patient who answers 'I'm fine' after 3 
+   follow-ups should still be scored 0, even if the psychologist was persistent. 
+   Persistence by the interviewer does not equal distress in the patient.
+
+**THE SKEPTIC'S RULE (CRITICAL):**
+1. Evidence MUST come from the transcript, not inferred from emotional tone or profile.
+2. If the patient's overall mood is low, but for THIS specific item they say 
+   'I'm fine', you MUST score 0.
+3. DO NOT assume symptoms exist just because the patient's general mood is low.
      
 **DATA SUFFICIENCY CHECK:**
 Rate the evidence provided in the transcript:
@@ -882,7 +887,7 @@ Rate the evidence provided in the transcript:
 To arrive at the final score, you MUST solve these sub-problems in order:
 1. **Identify Raw Evidence:** What are the specific literal statements made by the patient regarding this symptom?
 2. **Filter for Validity:** Apply the 'Normal Life Stress Filter'. Is this evidence a clinical symptom or a rational reaction to external stress (e.g., PhD workload)?
-3. **Determine Frequency:** Based strictly on valid evidence, how many days in the last 14 has this occurred? (Ignore vague terms; seek explicit counts).
+3. **Determine Frequency:** Based strictly on valid evidence, how many days in the last 14 has this occurred? (Ignore vague terms; seek explicit counts). If the patient does not provide a number or a frequency word (like 'most days' or 'every day'), you must conclude that frequency is unknown and default to Score 0.
 4. **Compare to Thresholds:** Map the frequency to the Scoring Rubric (0, 1, 2, or 3).
 5. **Final Synthesis:** Apply the 'Strict Calibration Override'. If evidence is borderline, choose the lower score.
 
@@ -914,7 +919,6 @@ Example:
 
 **ASSIGN SCORE:**""")
 ])
-
 
 # ================= NODE FUNCTIONS =================
 llm = ChatOpenAI(model=LLM_MODEL, temperature=LLM_TEMPERATURE, api_key=OPENAI_API_KEY)
@@ -967,7 +971,7 @@ def question_node(state: AgentState):
             
         instruction = state.get("nav_instruction", "Start this item by bridging from their last response.")
 
-    hist_str = "\n".join(state["history"][-4:])
+    hist_str = "\n".join(state["history"][-6:])
     
     question = (question_template | llm | str_parser).invoke({
         "item_label": state["current_item_label"],
@@ -1263,10 +1267,8 @@ def navigation_node(state: AgentState):
     raw_mode = state.get("current_difficulty", "none").lower()
     current_lvl = state.get("current_level", "level1")
     
-    if raw_mode == "none":
+    if raw_mode in ["none", "open", "resolution"]:
         injected_flaw = "none"
-    elif raw_mode in ["open", "resolution", "none"]:
-        injected_flaw = "none"          # ← these are not flaws
     elif "+" in raw_mode:
         injected_flaw = raw_mode.replace("+", ", ")
     else:
@@ -1520,7 +1522,7 @@ def transition_node(state: AgentState):
             "symptom_summaries": current_summaries
         }
     
-# 7. Batch Scoring Node (Updates Scores AND Analytics)
+# 7. Batch Scoring Node
 def batch_scoring_node(state: AgentState):
     print("\n⏳ Interview Complete. Starting Batch Scoring...")
     
@@ -1564,7 +1566,7 @@ def batch_scoring_node(state: AgentState):
                 f"- Vagueness: {s['Vagueness_Response']}\n"
                 f"- Timeframe issues: {s['Timeframe_Response']}\n"
                 f"- Relevance issues: {s['Relevance_Response']}\n"
-                f"- Total clarifications needed: {s['Total_Followups']}"
+                f"- Technical Note: {s['Total_Followups']} follow-ups were triggered by the experimental protocol, not necessarily by patient distress."
             )
 
         # 3. Invoke LLM
