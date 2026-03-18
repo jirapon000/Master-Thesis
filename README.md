@@ -45,7 +45,7 @@ To test the system's robustness against real-world linguistic variability, the s
 To run the system, use the following command:
 
 * Baseline (fixed order, no skipping)
-python3 MAGMA_Backup_NLI-GPT_.py --pid <participant_id>
+python3 MAGMA_Baseline.py --pid <participant_id>
 
 * Information Gain (PMI × MIRT skip)
 python3 MAGMA_InformationGain.py --pid <participant_id>
