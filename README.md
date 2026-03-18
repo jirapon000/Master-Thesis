@@ -19,12 +19,10 @@ The workflow is divided into four chronological stages: Interaction, Analysis, N
 * **Question Agent** - Facilitates the dialogue, asking PHQ-8 items and follow-up using 2 probing techniques (Funneling and Clarification) based on Network Approach to Psychopathology and Shea's Clinical Interviewing (Investigtion Loops).
 * **Clarification Agent**(Detection) - Monitors for "Missing Key Domains" (Timeframe, Severity, Relevance). Uses a hybrid NLI + GPT detection architecturee to trigger specific follow-ups.
 * **Alignment Agent**(Detection) - Monitors for logical consistency. Uses an Item-Dependency Map to verify that symptoms match (e.g., Item 1 links to Items 2, 4, 7, 8).
+    * **Four Adaptive Question Selection Strategies**: Baseline (fixed order), Information Gain (PMI × MIRT gain), Threshold (MIRT evidence ceiling), and Hybrid OR (either condition fires) — all sharing identical agent architecture with only the skip condition differing.
+    * **PMI-Weighted Symptom Co-occurrence Graph**: Population-level co-occurrence between PHQ-8 symptoms quantified via Pointwise Mutual Information (PMI), enabling evidence propagation from confirmed symptoms to correlated domains and principled adaptive skipping.
 * **Navigation Agent**(Control) - The logic gatekeeper. Evaluates signals from detection agents to decide whether to loop back for clarification or proceed to the next item.
 * **Scoring Agent**(Assessment) - Aggregates verified evidence to produce the final PHQ-8 severity score.
-
-* **Four Adaptive Question Selection Strategies**: Baseline (fixed order), Information Gain 
-(PMI × MIRT gain), Threshold (MIRT evidence ceiling), and Hybrid OR (either condition fires) — all sharing identical agent architecture with only the skip condition differing.
-* **PMI-Weighted Symptom Co-occurrence Graph**: Population-level co-occurrence between PHQ-8 symptoms quantified via Pointwise Mutual Information (PMI), enabling evidence propagation from confirmed symptoms to correlated domains and principled adaptive skipping.
 
 2. Operational Workflow
 The system actively halts linear progression if validity criteria are not met.
