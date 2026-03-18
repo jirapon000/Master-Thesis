@@ -44,16 +44,16 @@ To test the system's robustness against real-world linguistic variability, the s
 ## 🔬 How to run the model
 To run the system, use the following command:
 
-# Baseline (fixed order, no skipping)
+* Baseline (fixed order, no skipping)
 python3 MAGMA_Backup_NLI-GPT_.py --pid <participant_id>
 
-# Information Gain (PMI × MIRT skip)
+* Information Gain (PMI × MIRT skip)
 python3 MAGMA_InformationGain.py --pid <participant_id>
 
-# Threshold (MIRT evidence ceiling skip)
+* Threshold (MIRT evidence ceiling skip)
 python3 MAGMA_Threshold.py --pid <participant_id>
 
-# Hybrid OR (either condition fires)
+* Hybrid OR (either condition fires)
 python3 MAGMA-Hybrid.py --pid <participant_id>
 
 Replace <participant_id> with the ID of the participant you want to run.
