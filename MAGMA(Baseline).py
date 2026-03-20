@@ -526,6 +526,7 @@ def generate_dynamic_question(
     user_text: str,
     conversation_history: List[Dict] = None,
     candidate_domains: List[str] = None,
+    nav_instruction: str = "none",
 ) -> tuple:
     """
     YOUR Table A.5 approach: PMI shortlists top candidates, GPT picks + words.
@@ -555,8 +556,9 @@ def generate_dynamic_question(
     # Use QUESTION_AGENT_SYSTEM template (Agent 1)
     raw = (question_template | llm | str_parser).invoke({
         "evidence_summary": evidence_summary,
-        "history_text": history_text,
-        "candidates_text": candidates_text,
+        "history_text":     history_text,
+        "candidates_text":  candidates_text,
+        "nav_instruction":  nav_instruction,
     }).strip().replace("```json", "").replace("```", "").strip()
 
     try:
@@ -595,14 +597,17 @@ def compute_phq8_score_transcript(conversation_history: List[Dict]):
 
     try:
         result    = json.loads(raw)
+        clinical_note = result.pop("clinical_note", {})   # extract before iterating domains
         score_map = {k: int(v["score"])            for k, v in result.items()}
+        if any(s == -1 for s in score_map.values()):
+            return None, None, None, None, None, {}
         reasons   = {k: v.get("reason", "")        for k, v in result.items()}
         confidence     = {k: v.get("confidence", "High")          for k, v in result.items()}
         data_sufficiency = {k: v.get("data_sufficiency", "HIGH")  for k, v in result.items()}
         reasoning_chains = {k: v.get("reasoning_chain", {})       for k, v in result.items()}
-        return score_map, reasons, confidence, data_sufficiency, reasoning_chains
+        return score_map, reasons, confidence, data_sufficiency, reasoning_chains, clinical_note
     except (json.JSONDecodeError, KeyError, ValueError):
-        return None, None, None, None, None
+        return None, None, None, None, None, {}
 
 def compute_phq8_score_fallback(accumulated_evidence: Dict[str, float]):
     """YOUR MIRT threshold fallback if transcript scoring fails."""
@@ -638,6 +643,7 @@ class AgentState(TypedDict):
     items_evidence:              Dict[str, Any]
     final_scores:                List[Dict]
     scoring_explanations:        List[Dict]
+    clinical_note:               Dict[str, Any]
     agent_thoughts:              List[Dict]
     followup_count:              int
     intro_turn_count:            int
@@ -649,7 +655,7 @@ class AgentState(TypedDict):
     resolved_domains:            List[str]
     last_target_domain:          str
     rapport_score:               int
-    pmi_gain_log:                List[Dict]
+    baseline_log:                List[Dict]
 
     # YOUR new fields
     accumulated_evidence:        Dict[str, float]   # MIRT scores per PHQ key
@@ -658,6 +664,11 @@ class AgentState(TypedDict):
     corr_misalign_asked:         List[str]           # corr alignment pairs already addressed
     corr_alignment_flags:        List[Dict]          # latest corr alignment results
     conversation_history_dicts:  List[Dict]          # {"role": ..., "content": ...} format
+
+    # Injected helpers — must be declared so LangGraph preserves them
+    _pmi_matrix:                 Any
+    _corr_matrix:                Any
+    _mirt_extract:               Any
 
 # =============================================================================
 #  STEP 12 — LLM + PARSERS
@@ -706,6 +717,10 @@ Select the most natural one given the conversation history, or use the top one i
 {candidates_text}
 </candidate_questions>
 
+<navigation_instruction>
+{nav_instruction}
+</navigation_instruction>
+
 Output format — respond ONLY in this exact JSON:
 {{
   "selected_domain": "domain name from candidates",
@@ -715,11 +730,21 @@ Output format — respond ONLY in this exact JSON:
 
 Rules for the question — READ CAREFULLY:
 1. Sound like a real person texting a friend, not a clinician filling out a form
-2. SHORT — one sentence, max two. Never start with "Over the last..." or "In the past two weeks..."
+2. SHORT — exactly ONE sentence only. Never start with "Over the last..." or "In the past two weeks..."
 3. Weave recency naturally mid-sentence: "have you been...", "lately have you...", "these days do you..."
 4. NO formal openers like "How often have you found yourself...", "To what extent..."
 5. Reference what the user just said if it fits naturally
 6. If domain score near 0: ask broadly and gently. If 0.5-1.5: ask more specifically.
+7. STRATEGY SWITCHING — read the nav_instruction carefully:
+   - If nav_instruction contains [strategy: acknowledge_reask] →
+     Lead with ONE brief acknowledgment ("That sounds really hard" / "Thanks for sharing that")
+     then ask the question. Never skip straight to the question.
+   - If nav_instruction contains [strategy: offer_two_options] →
+     End the question with two concrete choices e.g. "...like every day, or more like a few times a week?"
+   - If nav_instruction contains [strategy: direct_estimate] →
+     Ask for a specific number or days e.g. "roughly how many days out of the last two weeks?"
+   - If nav_instruction contains [strategy: natural_reask] →
+     Rephrase the previous question naturally, do not repeat it word for word.
 
 Tone examples — BAD vs GOOD:
   ❌ "Over the last couple of weeks, how often have you found yourself actually enjoying these activities?"
@@ -747,17 +772,25 @@ You need to follow up on: {domain_meaning}
 Instruction from navigation agent: {nav_instruction}
 Last answer from patient: "{last_answer}"
 
-Write ONE short, warm follow-up question (1-2 sentences max).
+Write ONE short, warm follow-up question. Maximum 1 sentence only.
 Sound like a caring friend, not a survey.
-Weave recency naturally: "lately", "these days", "have you been"
 
-Rules:
-- Never start with "Over the last two weeks..." or "In the past 14 days..."
-- Never sound like a form or a rating scale
-- If instruction says address TIMEFRAME → slip "lately" or "recently" naturally into the question
-- If instruction says address VAGUENESS → ask something concrete like "like every day, or just occasionally?"
-- If instruction says address RELEVANCE → gently bring conversation back to the symptom
-- If instruction says address CONTRADICTION → use "I just want to make sure I understand..." framing
+STRICT ESCALATION RULES — you MUST follow the instruction exactly:
+- If instruction says "Pivot gently back" →
+  acknowledge what they said briefly, then redirect: "That makes sense — I'm also curious, have you noticed [symptom] lately?"
+- If instruction says "Be more direct" →
+  do NOT rephrase the last question. Ask something DIFFERENT and more specific about {domain_meaning}. 
+  Example: ask about a specific time, situation, or concrete example.
+- If instruction says "Directly link their story to the symptom" →
+  explicitly connect what they said to the symptom: "You mentioned [X] — does that also mean you've been experiencing [symptom]?"
+- If instruction says address TIMEFRAME →
+  slip "in the last two weeks" or "recently" naturally into the question
+- If instruction says address VAGUENESS →
+  end with two concrete options e.g. "...every day, or just occasionally?"
+- If instruction says address CONTRADICTION →
+  use "I just want to make sure I understand..." framing
+
+IMPORTANT: Never ask the same question twice. Each follow-up must be meaningfully different from the last answer context.
 
 Output only the question. No explanation, no preamble.\
 """),
@@ -804,7 +837,7 @@ Stay in character. DO NOT break character or mention being an AI.
 **BEHAVIOURAL INSTRUCTIONS:**
 1. **PRIMARY DIRECTIVE:** {special_instruction}
 2. Maintain Immersion: Never break character.
-3. Length: Keep to 1-3 sentences (concise but descriptive).
+3. Length: exactly ONE sentence only. Never more than one sentence.
 """),
     ("human", "Reply exactly as the participant:"),
 ])
@@ -833,7 +866,14 @@ Before deciding, think step-by-step:
 1. TIMEFRAME: Does the evidence ground the symptom in the last 14 days?
 2. VAGUENESS:  Can I distinguish Score 1 vs. Score 2 without guessing?
 3. RELEVANCE:  Is the patient answering the question, or deflecting/externalising?
-4. COMPOSITE:  Even if 1-3 individually pass, is the combination scorable?
+4. FREQUENCY THRESHOLD (PHQ-8 Criterion Check)
+    * PASS: Answer implies at least "several days" (2+ days in 2 weeks) — enough to score >= 1.
+    * FAIL: Answer implies only 1 day, once, or "just once" — cannot score above 0.
+    * If threshold cannot be determined → flag as "vagueness".
+5. GIVE_UP CHECK
+    * If follow-up count has reached maximum AND answer is still INCOMPLETE →
+    set status to "GIVE_UP" instead of "INCOMPLETE".
+    This signals the navigation agent to stop pressing and move on.
 
 **CRITERIA GUIDELINES:**
 
@@ -854,13 +894,14 @@ Before deciding, think step-by-step:
 
 **OUTPUT FORMAT — strict JSON, double quotes:**
 {{
-  "status": "COMPLETE" or "INCOMPLETE",
-  "reasoning": "step-by-step evaluation of Timeframe, Vagueness, Relevance",
+  "status": "COMPLETE" or "INCOMPLETE" or "GIVE_UP",
+  "reasoning": "step-by-step evaluation of Timeframe, Vagueness, Relevance, Frequency",
   "reason": "brief summary for the psychologist",
-  "missing_domains": ["timeframe", "vagueness", "relevance"]
+  "missing_domains": ["timeframe", "vagueness", "relevance", "frequency_threshold"],
+  "frequency_estimate": "estimated days out of 14, or 'unknown'"
 }}
 """),
-    ("human", "Conversation History:\n{history_str}\n\nLatest Q: {question}\nLatest A: {answer}"),
+    ("human", "Conversation History:\n{history_str}\n\nLatest Q: {question}\nLatest A: {answer}\nCurrent Item: {current_item_label}\nFollow-up Count: {followup_count} / {max_followups}"),
 ])
 
 # -----------------------------------------------------------------------------
@@ -885,6 +926,7 @@ based strictly on the provided Alignment Rule and Relevant History.
 * CONTRADICTING: Current answer is logically impossible or highly unlikely given past answers
                  (e.g. "I sleep 12 hours a day" vs "I never sleep").
 * UNCERTAIN:     Answers seem different but may not be a hard contradiction (minor mood fluctuations).
+                 UNCERTAIN always triggers a soft follow-up — do NOT treat it the same as CONSISTENT.
 
 **MULTI-PERSPECTIVE ALIGNMENT ANALYSIS (PCoT Workflow):**
 Before the final verdict, evaluate through three clinical lenses:
@@ -895,6 +937,8 @@ Before the final verdict, evaluate through three clinical lenses:
 3. **Behavioral Lens:** Does reported behaviour match previous functional reports?
    (e.g. Restlessness vs. Perfect Concentration)
 4. **Consensus Synthesis:** If ANY lens shows a hard logical impossibility → CONTRADICTING.
+   If lenses show tension but no hard impossibility → UNCERTAIN.
+   Only use CONSISTENT when all three lenses show no tension at all.
 
 **REFERENCE CASE STUDIES:**
 
@@ -917,6 +961,12 @@ Type 4 — Consistent (Expected Correlation):
 * Past:    "I'm always exhausted."
 * Current: "Yeah, it's hard to focus on TV shows because I drift off."
 * Verdict: CONSISTENT — drifting focus is a logical consequence of exhaustion.
+     
+Type 5 — Uncertain (Soft Tension):
+* Past:    "I've been feeling pretty low most days."
+* Current: "I managed to go to the gym twice this week."
+* Verdict: UNCERTAIN — gym visits don't fully contradict low mood but create tension
+           worth exploring. Soft follow-up recommended.
 
 **OUTPUT FORMAT — strict JSON, double quotes:**
 {{
@@ -926,10 +976,13 @@ Type 4 — Consistent (Expected Correlation):
         "affective_check": "evaluation of emotional coherence",
         "behavioral_check": "evaluation of functional/behavioural alignment"
     }},
-    "reason": "final summary — one sentence"
+    "reason": "final summary — one sentence",
+    "soft_followup_suggested": true or false
 }}
 """),
     ("human", """\
+**CURRENT ITEM BEING ASSESSED:** {current_item_label}
+
 **CURRENT ANSWER:**
 "{answer}"
 
@@ -950,28 +1003,50 @@ navigation_template = ChatPromptTemplate.from_messages([
 You are the **Navigation Control** for a clinical interview.
 
 **YOUR JOB:**
-Review the status reports from the Clarification Agent, the Alignment Agent (NLI),
-and the Correlation Alignment check, then decide the next step.
+Review all status reports and contextual signals, then decide the SINGLE best next action.
 
-**DECISION LOGIC (Strict Order):**
+**DECISION LOGIC (Strict Priority Order):**
 
-**1. FOLLOW_UP** — trigger if ANY of these flags are true:
-   - Clarification Status is "INCOMPLETE" or "AMBIGUOUS"
-   - Alignment Status is "CONTRADICTING" (NLI semantic mismatch)
-   - Correlation Alignment Flags are present (statistical score-level gap)
-   - Patient used non-committal words ("sometimes", "maybe", "I guess")
-   - Missing Frequency (days) or Duration data
+**1. FORCE_CHOICE** — trigger if ALL of these are true:
+   - Follow-up Count has reached the maximum allowed
+   - Answer is STILL INCOMPLETE or CONTRADICTING
+   - Rapport Score >= 3 (patient is cooperative enough)
+   Action: Present binary options to the patient instead of an open question.
 
-**2. NEXT_ITEM** — trigger only if ALL of these are true:
-   - Answer is clear and scorable (Clarification = COMPLETE)
-   - Story is consistent (Alignment = CONSISTENT or UNCERTAIN)
+**2. EMPATHY_PAUSE** — trigger if ANY of these are true:
+   - Last answer contains distress signals: words like "hopeless", "can't take it",
+     "overwhelmed", "I don't know anymore", "what's the point"
+   - Rapport Score <= 2 AND Clarification is INCOMPLETE
+   Action: Acknowledge before re-asking. Do NOT push for data immediately.
+
+**3. FOLLOW_UP** — trigger if ANY of these are true AND follow-up count < max:
+   - Clarification Status is "INCOMPLETE"
+   - Alignment Status is "CONTRADICTING"
+   - Correlation Alignment Flags are present
+   - Last answer used non-committal words ("sometimes", "maybe", "I guess", "a bit")
+   - Frequency (days/week) is missing from the answer
+   Specify the PRIORITY issue: vagueness | timeframe | relevance | contradiction | corr_gap
+   Specify the STRATEGY: natural_reask | offer_two_options | direct_estimate | acknowledge_reask
+
+**4. NEXT_ITEM** — trigger only if ALL of these are true:
+   - Clarification = COMPLETE
+   - Alignment = CONSISTENT or UNCERTAIN
    - No Correlation Alignment Flags present
-   - No further clarification needed
+   - Follow-up count < max (or answer is sufficiently clear despite max reached)
+
+**RAPPORT ADJUSTMENT RULES:**
+- Rapport 1-2 (low trust): Prefer EMPATHY_PAUSE over immediate FOLLOW_UP.
+  Never use direct_estimate strategy. Prefer natural_reask.
+- Rapport 3 (neutral):     Standard decision logic applies.
+- Rapport 4-5 (high trust): Can use offer_two_options or direct_estimate freely.
 
 **OUTPUT FORMAT — strict JSON, double quotes:**
-{{ "next_action": "NEXT_ITEM", "instruction": "Proceed to next item." }}
-or
-{{ "next_action": "FOLLOW_UP", "instruction": "Address the [DOMAIN] issue. [strategy]." }}
+{{
+  "next_action": "NEXT_ITEM | FOLLOW_UP | FORCE_CHOICE | EMPATHY_PAUSE",
+  "priority": "vagueness | timeframe | relevance | contradiction | corr_gap | none",
+  "strategy": "natural_reask | offer_two_options | direct_estimate | acknowledge_reask | none",
+  "instruction": "one specific sentence telling the question agent exactly what to do next"
+}}
 """),
     ("human", """\
 **STATUS REPORT:**
@@ -980,6 +1055,10 @@ or
 - Alignment Status (NLI):      {a_stat}
 - Alignment Reason (NLI):      {a_reas}
 - Correlation Alignment Flags: {corr_flags}
+- Current Item:                {current_item_label}
+- Follow-up Count:             {followup_count} / {max_followups}
+- Rapport Score:               {rapport_score} / 5
+- Last Patient Answer:         "{last_answer}"
 
 **DECISION:**"""),
 ])
@@ -1071,6 +1150,16 @@ beyond what is written. Score ALL 8 PHQ-8 domains in a single pass.
 4. step4_rubric_mapping:           Preliminary score selection based on frequency threshold.
 5. step5_conservative_synthesis:   Final adjustment using Skeptic's Rule for borderline cases.
 
+**DIAGNOSTIC SYNTHESIS (run AFTER scoring all 8 domains):**
+Sum all 8 scores to get the total PHQ-8 score, then apply this severity mapping:
+- Total 0–4:   None / Minimal depression
+- Total 5–9:   Mild depression
+- Total 10–14: Moderate depression
+- Total 15–19: Moderately severe depression
+- Total 20–24: Severe depression
+Note: A score >= 10 crosses the clinical threshold for likely Major Depressive Disorder.
+Include this synthesis as a "clinical_note" field at the end of your JSON output.
+    
 **PHQ-8 DOMAINS TO SCORE:**
 - PHQ_8NoInterest:    Little interest or pleasure in doing things (0-3)
 - PHQ_8Depressed:     Feeling down, depressed, or hopeless (0-3)
@@ -1085,10 +1174,12 @@ beyond what is written. Score ALL 8 PHQ-8 domains in a single pass.
 {transcript_text}
 </interview_history>
 
-Respond ONLY in this exact JSON format, no extra text, no markdown:
+Respond ONLY in this exact JSON format, no extra text, no markdown.
+Replace every "score" value with the actual integer score (0, 1, 2, or 3) based on the transcript.
+Do NOT copy the example scores — evaluate each domain independently:
 {{
   "PHQ_8NoInterest": {{
-    "score": 0,
+    "score": -1,
     "confidence": "High",
     "data_sufficiency": "HIGH",
     "reasoning_chain": {{
@@ -1101,7 +1192,9 @@ Respond ONLY in this exact JSON format, no extra text, no markdown:
     "reason": "brief final explanation"
   }},
   "PHQ_8Depressed": {{
-    "score": 0, "confidence": "High", "data_sufficiency": "HIGH",
+    "score": -1, 
+    "confidence": "High", 
+    "data_sufficiency": "HIGH",
     "reasoning_chain": {{
       "step1_evidence_extraction": "", "step2_validity_filtering": "",
       "step3_frequency_quantification": "", "step4_rubric_mapping": "",
@@ -1110,7 +1203,9 @@ Respond ONLY in this exact JSON format, no extra text, no markdown:
     "reason": ""
   }},
   "PHQ_8Sleep": {{
-    "score": 0, "confidence": "High", "data_sufficiency": "HIGH",
+    "score": -1, 
+    "confidence": "High", 
+    "data_sufficiency": "HIGH",
     "reasoning_chain": {{
       "step1_evidence_extraction": "", "step2_validity_filtering": "",
       "step3_frequency_quantification": "", "step4_rubric_mapping": "",
@@ -1119,7 +1214,9 @@ Respond ONLY in this exact JSON format, no extra text, no markdown:
     "reason": ""
   }},
   "PHQ_8Tired": {{
-    "score": 0, "confidence": "High", "data_sufficiency": "HIGH",
+    "score": -1, 
+    "confidence": "High", 
+    "data_sufficiency": "HIGH",
     "reasoning_chain": {{
       "step1_evidence_extraction": "", "step2_validity_filtering": "",
       "step3_frequency_quantification": "", "step4_rubric_mapping": "",
@@ -1128,7 +1225,9 @@ Respond ONLY in this exact JSON format, no extra text, no markdown:
     "reason": ""
   }},
   "PHQ_8Appetite": {{
-    "score": 0, "confidence": "High", "data_sufficiency": "HIGH",
+    "score": -1,
+    "confidence": "High", 
+    "data_sufficiency": "HIGH",
     "reasoning_chain": {{
       "step1_evidence_extraction": "", "step2_validity_filtering": "",
       "step3_frequency_quantification": "", "step4_rubric_mapping": "",
@@ -1137,7 +1236,9 @@ Respond ONLY in this exact JSON format, no extra text, no markdown:
     "reason": ""
   }},
   "PHQ_8Failure": {{
-    "score": 0, "confidence": "High", "data_sufficiency": "HIGH",
+    "score": -1, 
+    "confidence": "High", 
+    "data_sufficiency": "HIGH",
     "reasoning_chain": {{
       "step1_evidence_extraction": "", "step2_validity_filtering": "",
       "step3_frequency_quantification": "", "step4_rubric_mapping": "",
@@ -1146,7 +1247,9 @@ Respond ONLY in this exact JSON format, no extra text, no markdown:
     "reason": ""
   }},
   "PHQ_8Concentrating": {{
-    "score": 0, "confidence": "High", "data_sufficiency": "HIGH",
+    "score": -1, 
+    "confidence": "High", 
+    "data_sufficiency": "HIGH",
     "reasoning_chain": {{
       "step1_evidence_extraction": "", "step2_validity_filtering": "",
       "step3_frequency_quantification": "", "step4_rubric_mapping": "",
@@ -1155,13 +1258,21 @@ Respond ONLY in this exact JSON format, no extra text, no markdown:
     "reason": ""
   }},
   "PHQ_8Moving": {{
-    "score": 0, "confidence": "High", "data_sufficiency": "HIGH",
+    "score": -1, 
+    "confidence": "High", 
+    "data_sufficiency": "HIGH",
     "reasoning_chain": {{
       "step1_evidence_extraction": "", "step2_validity_filtering": "",
       "step3_frequency_quantification": "", "step4_rubric_mapping": "",
       "step5_conservative_synthesis": ""
     }},
     "reason": ""
+  }},
+  "clinical_note": {{
+    "total_score": 0,
+    "severity": "None / Minimal | Mild | Moderate | Moderately Severe | Severe",
+    "mdd_threshold_crossed": true or false,
+    "summary": "one sentence clinical observation about the symptom pattern"
   }}
 }}\
 """),
@@ -1175,7 +1286,7 @@ Respond ONLY in this exact JSON format, no extra text, no markdown:
 # ── NODE 1: Question Node (YOUR generate_dynamic_question replaces MAGMA template)
 def question_node(state: AgentState):
     idx = state["current_item_index"]
-    pmi_gain_log = list(state.get("pmi_gain_log", []))
+    baseline_log = list(state.get("baseline_log", []))
 
     # INTRO
     if idx == 0:
@@ -1231,64 +1342,42 @@ def question_node(state: AgentState):
             selected_domain = state["current_item_id"]
 
         else:
-            # PMI gain selection — pick best unasked domain
-            visited   = list(set(
-                [PHQ_KEY_TO_ITEM[k]["item_id"] for k in asked_keys if k in PHQ_KEY_TO_ITEM]
-            ))
+            # Baseline: fixed order I1→I2→...→I8, NO skipping
             remaining_keys = [k for k in ITEMS if k not in asked_keys]
 
             if not remaining_keys:
-                # All asked — just ask a gentle wrap-up
                 question        = "Is there anything else about how you've been feeling that you'd like to share?"
                 selected_domain = state.get("current_item_id", "I1")
             else:
-                if pmi_matrix is not None:
-                    #choose the best question to ask based on the information gain
-                    recs = {
-                        cand: sum(
-                            accumulated.get(s, 0) * pmi_matrix.loc[cand, s]
-                            for s in accumulated
-                        ) * (1 / max(accumulated.get(cand, 0.01), 0.01))
-                        for cand in remaining_keys
-                    }
-                    top_candidates = sorted(recs, key=recs.get, reverse=True)[:3]
+                # Pick next domain in fixed order — no skipping at all
+                best_domain = None
+                for h in PHQ8_HYPOTHESES:
+                    if h["phq_key"] not in asked_keys:
+                        best_domain = h["phq_key"]
+                        break
 
-                    #Log PMI gains for this turn
-                    pmi_gain_log.append({
-                        "turn_index":       len(state["transcript"]) + 1,
-                        "item_id":          state.get("current_item_id", ""),
-                        "selected_domain":  top_candidates[0] if top_candidates else "",
-                        "gain_1":           round(recs[top_candidates[0]], 4) if len(top_candidates) > 0 else 0,
-                        "candidate_2":      top_candidates[1] if len(top_candidates) > 1 else "",
-                        "gain_2":           round(recs[top_candidates[1]], 4) if len(top_candidates) > 1 else 0,
-                        "candidate_3":      top_candidates[2] if len(top_candidates) > 2 else "",
-                        "gain_3":           round(recs[top_candidates[2]], 4) if len(top_candidates) > 2 else 0,
-                        "remaining_count":  len(remaining_keys),
-                    })
-                    print(f"  [PMI Gains] {[(c, round(recs[c],4)) for c in top_candidates]}")
-                    best_domain    = top_candidates[0]
+                if best_domain is None:
+                    question        = "Is there anything else about how you've been feeling that you'd like to share?"
+                    selected_domain = state.get("current_item_id", "I1")
                 else:
-                    top_candidates = remaining_keys[:3]
-                    best_domain    = remaining_keys[0]
+                    conv_hist   = state.get("conversation_history_dicts", [])
+                    last_answer = state.get("last_answer", "")
 
-                conv_hist = state.get("conversation_history_dicts", [])
-                last_answer = state.get("last_answer", "")
+                    question, sel = generate_dynamic_question(
+                        best_domain=best_domain,
+                        evidence=accumulated,
+                        user_text=last_answer,
+                        conversation_history=conv_hist,
+                        candidate_domains=[best_domain],
+                        nav_instruction=nav_instr,
+                    )
 
-                question, sel = generate_dynamic_question(
-                    best_domain=best_domain,
-                    evidence=accumulated,
-                    user_text=last_answer,
-                    conversation_history=conv_hist,
-                    candidate_domains=top_candidates,
-                )
-
-                # Update current item to match selected domain
-                phq_item = PHQ_KEY_TO_ITEM.get(sel, PHQ_KEY_TO_ITEM.get(best_domain))
-                if phq_item:
-                    state["current_item_id"]    = phq_item["item_id"]
-                    state["current_item_label"] = phq_item["label"]
-                    state["current_hypothesis"] = phq_item["text"]
-                selected_domain = state["current_item_id"]
+                    phq_item = PHQ_KEY_TO_ITEM.get(sel, PHQ_KEY_TO_ITEM.get(best_domain))
+                    if phq_item:
+                        state["current_item_id"]    = phq_item["item_id"]
+                        state["current_item_label"] = phq_item["label"]
+                        state["current_hypothesis"] = phq_item["text"]
+                    selected_domain = state["current_item_id"]
 
     print(f"\n👩‍⚕️ Psychologist ({state['current_item_id']}): {question}")
 
@@ -1311,8 +1400,9 @@ def question_node(state: AgentState):
         "current_item_id":            state["current_item_id"],
         "current_item_label":         state["current_item_label"],
         "current_hypothesis":         state["current_hypothesis"],
+        "current_item_index":         state.get("current_item_index", 0),
         "conversation_history_dicts": conv_hist_dicts,
-        "pmi_gain_log":               pmi_gain_log,
+        "baseline_log":               baseline_log,
     }
 
 
@@ -1382,10 +1472,33 @@ def participant_node(state: AgentState):
             )
             print(f"  [Correlation Boost → {boost_summary}]")
 
-    # Track asked domains
+    # Track asked domains FIRST
     asked_keys = list(state.get("asked_phq_keys", []))
     if current_phq_key and current_phq_key not in asked_keys:
         asked_keys.append(current_phq_key)
+    gpt_phq_key = ITEM_ID_TO_PHQ_KEY.get(state.get("current_item_id", ""), "")
+    if gpt_phq_key and gpt_phq_key not in asked_keys:
+        asked_keys.append(gpt_phq_key)
+
+    # ── Baseline Log (full evidence snapshot per turn)
+    baseline_log     = list(state.get("baseline_log", []))
+    remaining_log    = [h for h in PHQ8_HYPOTHESES if h["phq_key"] not in asked_keys]
+    baseline_log.append({
+        "turn_index":        len(state["transcript"]) + 1,
+        "item_id":           state.get("current_item_id", ""),
+        "domain_asked":      current_phq_key,
+        "I1_NoInterest":     round(accumulated.get("PHQ_8NoInterest", 0), 4),
+        "I2_Depressed":      round(accumulated.get("PHQ_8Depressed", 0), 4),
+        "I3_Sleep":          round(accumulated.get("PHQ_8Sleep", 0), 4),
+        "I4_Tired":          round(accumulated.get("PHQ_8Tired", 0), 4),
+        "I5_Appetite":       round(accumulated.get("PHQ_8Appetite", 0), 4),
+        "I6_Failure":        round(accumulated.get("PHQ_8Failure", 0), 4),
+        "I7_Concentrating":  round(accumulated.get("PHQ_8Concentrating", 0), 4),
+        "I8_Moving":         round(accumulated.get("PHQ_8Moving", 0), 4),
+        "remaining_count":   len(remaining_log),
+        "unique_asked":      len(asked_keys),
+        "total_turns_asked": len(state["transcript"]),
+    })
 
     return {
         "last_answer":                answer_text,
@@ -1396,6 +1509,7 @@ def participant_node(state: AgentState):
         "accumulated_evidence":       accumulated,
         "asked_phq_keys":             asked_keys,
         "conversation_history_dicts": conv_hist_dicts,
+        "baseline_log":               baseline_log,
     }
 
 
@@ -1433,25 +1547,34 @@ def clarification_node(state: AgentState):
         cot_reason = "Discard — no strong signal"
 
     # GPT-based: timeframe only (NLI cannot detect recency)
-    tf_res  = (clarification_template | llm | json_parser).invoke({
-    "question":    state["last_question"],
-    "answer":      state["last_answer"],
-    "history_str": focused_hist,
+    tf_res = (clarification_template | llm | json_parser).invoke({
+        "question":           state["last_question"],
+        "answer":             state["last_answer"],
+        "history_str":        focused_hist,
+        "current_item_label": state.get("current_item_label", "Unknown"),
+        "followup_count":     state.get("followup_count", 0),
+        "max_followups":      MAX_FOLLOWUPS,
     })
     tf_missing = tf_res.get("missing_domains", [])
-    if "timeframe" in tf_missing and "timeframe" not in missing:
-        missing.append("timeframe")
-        status     = "INCOMPLETE"
-        cot_reason += " | GPT: timeframe missing"
+    for domain in ["timeframe", "frequency_threshold"]:
+        if domain in tf_missing and domain not in missing:
+            missing.append(domain)
+            status     = "INCOMPLETE"
+            cot_reason += f" | GPT: {domain} missing"
 
-    summary_r = cot_reason
+    # Override to GIVE_UP if GPT said so
+    if tf_res.get("status") == "GIVE_UP":
+        status     = "GIVE_UP"
+        cot_reason += " | GPT: GIVE_UP — max followups exhausted"
+
+    freq_estimate = tf_res.get("frequency_estimate", "unknown")
+    summary_r     = cot_reason
 
     return {
         "clarification_status":          status,
-        "clarification_reason":          f"{cot_reason} | Summary: {summary_r}",
+        "clarification_reason":          f"{cot_reason} | Summary: {summary_r} | Freq: {freq_estimate}",
         "clarification_missing_domains": missing,
     }
-
 
 # ── NODE 4: Alignment Node (MAGMA NLI + YOUR .corr() — both run here)
 def alignment_node(state: AgentState):
@@ -1463,6 +1586,10 @@ def alignment_node(state: AgentState):
 
     nli_status = "CONSISTENT"
     nli_reason = "No contradictions found."
+    focused_hist = "".join(       
+        f"{t.get('speaker','')}: {t.get('text','')}\n"
+        for t in history_turns
+    )
     for prev_turn in history_turns:
         probs = compute_nli_probs(state["last_answer"], prev_turn["text"])
         if probs["p_contradict"] >= CONTRADICT_THRESHOLD:
@@ -1470,6 +1597,29 @@ def alignment_node(state: AgentState):
             nli_reason = (f"P_contradict={round(probs['p_contradict'],3)} >= 0.7 "
                       f"against: '{prev_turn['text'][:80]}'")
             break
+    # --- 4a-2. GPT alignment (three-lens PCoT) — runs when NLI is inconclusive ---
+    if nli_status != "CONTRADICTING" and focused_hist.strip():        # ← ADD FROM HERE
+        try:
+            raw_alignment = (alignment_template | llm | str_parser).invoke({
+                "answer":              state["last_answer"],
+                "history_str":         focused_hist,
+                "current_item_label":  state.get("current_item_label", "Unknown"),
+            })
+            # Clean trailing commas before parsing
+            import re
+            cleaned = re.sub(r',\s*([}\]])', r'\1', raw_alignment.strip().replace("```json","").replace("```","").strip())
+            gpt_res = json.loads(cleaned)
+        except Exception:
+            gpt_res = {"status": "CONSISTENT", "reason": "", "soft_followup_suggested": False}
+        gpt_status = gpt_res.get("status", "CONSISTENT")
+        gpt_reason = gpt_res.get("reason", "")
+        gpt_soft   = gpt_res.get("soft_followup_suggested", False)
+        if gpt_status == "CONTRADICTING":
+            nli_status = "CONTRADICTING"
+            nli_reason = f"GPT three-lens: {gpt_reason}"
+        elif gpt_status == "UNCERTAIN":
+            nli_status = "UNCERTAIN"
+            nli_reason = f"GPT soft tension: {gpt_reason} | soft_followup={gpt_soft}"
 
     # --- 4b. YOUR correlation-based alignment (score-level, statistical) ---
     corr_matrix  = state.get("_corr_matrix")
@@ -1500,6 +1650,9 @@ def alignment_node(state: AgentState):
                 for f in corr_flags
             )
             merged_reason += f" | CORR ALIGNMENT: {corr_detail}"
+    elif nli_status == "UNCERTAIN":
+        merged_status = "UNCERTAIN"
+        merged_reason = nli_reason
     else:
         merged_status = nli_status
         merged_reason = nli_reason
@@ -1573,15 +1726,22 @@ def navigation_node(state: AgentState):
     ) or "None"
 
     res = (navigation_template | llm | json_parser).invoke({
-        "c_stat":     state["clarification_status"],
-        "c_reas":     state["clarification_reason"],
-        "a_stat":     state.get("alignment_status", "UNKNOWN"),
-        "a_reas":     state.get("alignment_reason", "None"),
-        "corr_flags": corr_flags_str,
+        "c_stat":              state["clarification_status"],
+        "c_reas":              state["clarification_reason"],
+        "a_stat":              state.get("alignment_status", "UNKNOWN"),
+        "a_reas":              state.get("alignment_reason", "None"),
+        "corr_flags":          corr_flags_str,
+        "current_item_label":  state.get("current_item_label", "Unknown"),
+        "followup_count":      current_retries,
+        "max_followups":       MAX_FOLLOWUPS,
+        "rapport_score":       state.get("rapport_score", 3),
+        "last_answer":         state.get("last_answer", ""),
     })
 
     proposed_action  = res.get("next_action", "NEXT_ITEM")
     base_instruction = res.get("instruction", "")
+    nav_priority     = res.get("priority", "none")       # NEW
+    nav_strategy     = res.get("strategy", "none")       # NEW
 
     # Decision logic
     selected_domain = None
@@ -1590,8 +1750,13 @@ def navigation_node(state: AgentState):
     if pmi_stop and proposed_action != "FOLLOW_UP":
         final_action      = "NEXT_ITEM"
         final_instruction = "Move to next item (PMI gain threshold met)."
-
-    elif proposed_action == "FOLLOW_UP" and current_retries >= 3:
+    elif state.get("clarification_status") == "GIVE_UP":
+        final_action      = "NEXT_ITEM"
+        final_instruction = "Move to next item (clarification gave up)."
+        missing_list      = []
+        selected_domain   = None
+        new_followup_count = 0
+    elif proposed_action == "FOLLOW_UP" and current_retries >= MAX_FOLLOWUPS:
         print(f"   [Logic] 🛑 MAX RETRIES ({current_retries}) HIT -> Forcing Next Item...")
         final_action      = "NEXT_ITEM"
         final_instruction = "Move to next item."
@@ -1613,15 +1778,21 @@ def navigation_node(state: AgentState):
             if selected_domain == "contradiction"
             else state.get("clarification_reason")
         )
-        final_instruction = f"Address the {selected_domain.upper()} issue. Context: {reason_ctx}. {style_guide}"
+        final_instruction = (
+            f"Address the {selected_domain.upper()} issue. "
+            f"Context: {reason_ctx}. "
+            f"{style_guide} "
+            f"[strategy: {nav_strategy}]"
+        )
 
     else:
         if proposed_action == "FOLLOW_UP" and not missing_list:
             final_action      = "NEXT_ITEM"
             final_instruction = "Proceed to next item."
         elif state["current_item_id"] == "CLOSING":
-            final_action      = "NEXT_ITEM"
-            final_instruction = "End interview."
+            final_action       = "NEXT_ITEM"
+            final_instruction  = "End interview."
+            new_followup_count = 0
         else:
             final_action      = proposed_action
             final_instruction = base_instruction
@@ -1629,7 +1800,7 @@ def navigation_node(state: AgentState):
 
     # Print status
     if final_action == "FOLLOW_UP" and selected_domain:
-        print(f"   [Logic] ⚠️  ISSUE: {selected_domain.upper()} -> Strategy: {style_guide} (Attempt {current_retries + 1}/3)...")
+        print(f"   [Logic] ⚠️  ISSUE: {selected_domain.upper()} -> Strategy: {style_guide} (Attempt {current_retries + 1}/{MAX_FOLLOWUPS})...")
         print(f"           (Resolved so far: {resolved})")
         new_followup_count = current_retries + 1
     else:
@@ -1707,6 +1878,8 @@ def navigation_node(state: AgentState):
         "alignment_logic_chain":     state["alignment_reason"],
         "corr_alignment_flags":      corr_flags,
         "decision":                  final_action,
+        "nav_priority":              nav_priority,    
+        "nav_strategy":              nav_strategy,    
         "instruction":               final_instruction,
     }
 
@@ -1831,8 +2004,11 @@ def transition_node(state: AgentState):
     current_summaries = list(state.get("symptom_summaries", []))
     current_summaries.append(symptom_entry)
 
-    next_idx = current_idx + 1
-    if next_idx > 8:
+    # Baseline: strict fixed order, ask ALL 8, no skipping
+    asked_keys  = list(state.get("asked_phq_keys", []))
+    remaining   = [h for h in PHQ8_HYPOTHESES if h["phq_key"] not in asked_keys]
+
+    if not remaining:
         return {
             "current_item_index": 9,
             "current_item_id":    "CLOSING",
@@ -1846,20 +2022,20 @@ def transition_node(state: AgentState):
             "domain_attempts":    {},
             "last_target_domain": None,
         }
-    else:
-        next_item = PHQ8_HYPOTHESES[next_idx - 1]
-        return {
-            "current_item_index": next_idx,
-            "current_item_id":    next_item["item_id"],
-            "current_item_label": next_item["label"],
-            "current_hypothesis": next_item["text"],
-            "nav_instruction":    "Start next item.",
-            "followup_count":     0,
-            "rapport_score":      new_rapport,
-            "resolved_domains":   [],
-            "domain_attempts":    {},
-            "symptom_summaries":  current_summaries,
-        }
+
+    next_item = remaining[0]
+    return {
+        "current_item_index": PHQ8_HYPOTHESES.index(next_item) + 1,
+        "current_item_id":    next_item["item_id"],
+        "current_item_label": next_item["label"],
+        "current_hypothesis": next_item["text"],
+        "nav_instruction":    "Start next item.",
+        "followup_count":     0,
+        "rapport_score":      new_rapport,
+        "resolved_domains":   [],
+        "domain_attempts":    {},
+        "symptom_summaries":  current_summaries,
+    }
 
 
 # ── NODE 7: Batch Scoring Node — hybrid transcript scorer (Agent 6)
@@ -1870,10 +2046,14 @@ def batch_scoring_node(state: AgentState):
     scoring_explanations = []
     updated_analytics    = list(state.get("analytics_records", []))
     accumulated_evidence = state.get("accumulated_evidence", {k: 0.0 for k in ITEMS})
-    conv_hist_dicts      = state.get("conversation_history_dicts", [])
+    # Build from state["transcript"] -- always populated
+    conv_hist_dicts = [
+        {"role": t["role"], "content": t["text"]}
+        for t in state.get("transcript", [])
+    ]
 
     # ── Call Agent 6: SCORING_AGENT_SYSTEM (single transcript call, all 8 domains)
-    score_map, reasons, confidence_map, sufficiency_map, reasoning_chains = \
+    score_map, reasons, confidence_map, sufficiency_map, reasoning_chains, clinical_note = \
         compute_phq8_score_transcript(conv_hist_dicts)
 
     # ── Fallback to MIRT threshold if transcript scoring fails
@@ -1884,6 +2064,7 @@ def batch_scoring_node(state: AgentState):
         confidence_map   = {s: "Low"                      for s in ITEMS}
         sufficiency_map  = {s: "LOW"                      for s in ITEMS}
         reasoning_chains = {s: {}                         for s in ITEMS}
+        clinical_note    = {}                              # ← ADD THIS
         scoring_method   = "MIRT Threshold (fallback)"
         print("   ⚠️  Transcript scoring failed — using MIRT fallback.")
 
@@ -1948,6 +2129,7 @@ def batch_scoring_node(state: AgentState):
         "final_scores":          final_scores,
         "scoring_explanations":  scoring_explanations,
         "analytics_records":     updated_analytics,
+        "clinical_note":         clinical_note,
     }
 
 
@@ -1972,7 +2154,8 @@ def build_graph():
     workflow.add_edge("alignment_node",     "navigation_node")
 
     def check_nav(state):
-        if state.get("followup_count", 0) > 0 and state["nav_instruction"] != "End experiment.":
+        if (state.get("next_action") == "FOLLOW_UP"
+                and state.get("current_item_id") not in ["CLOSING", "INTRO"]):
             return "question_node"
         return "transition_node"
 
@@ -2081,7 +2264,7 @@ def main():
         "last_question":                 "",
         "last_answer":                   "",
         "next_action":                   "",
-        "pmi_gain_log":                  [],
+        "baseline_log":                  [],
 
         # YOUR new fields
         "accumulated_evidence":          accumulated_init,
@@ -2113,7 +2296,7 @@ def main():
         "ex": os.path.join(base_dir, "Scoring_Explanations"),
         "an": os.path.join(base_dir, "Analysis_Metrics"),
         "sy": os.path.join(base_dir, "Symptoms"),
-        "gn": os.path.join(base_dir, "PMI_Gains")
+        "gn": os.path.join(base_dir, "Baseline_Log")
     }
     for d in dirs.values():
         os.makedirs(d, exist_ok=True)
@@ -2176,14 +2359,16 @@ def main():
             w.writeheader()
             w.writerows(sym_records)
 
-    # H. PMI Gain Log CSV
-    gain_path = os.path.join(dirs["gn"], f"PMI_Gains_{args.pid}.csv")
-    gain_records = final_state.get("pmi_gain_log", [])
+    # H. Baseline Log CSV
+    gain_path = os.path.join(dirs["gn"], f"Baseline_Log_{args.pid}.csv")
+    gain_records = final_state.get("baseline_log", [])
     for r in gain_records:
         r["PID"] = args.pid
     if gain_records:
-        keys = ["PID", "turn_index", "item_id", "selected_domain", "gain_1",
-            "candidate_2", "gain_2", "candidate_3", "gain_3", "remaining_count"]
+        keys = ["PID", "turn_index", "item_id", "domain_asked",
+                "I1_NoInterest", "I2_Depressed", "I3_Sleep", "I4_Tired",
+                "I5_Appetite", "I6_Failure", "I7_Concentrating", "I8_Moving",
+                "remaining_count", "unique_asked", "total_turns_asked"]
         with open(gain_path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=keys)
             w.writeheader()
